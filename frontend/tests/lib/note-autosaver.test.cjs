@@ -8,7 +8,7 @@ const vm = require('node:vm');
 function compile(relative, overrides = {}) {
   const source = fs.readFileSync(path.join(__dirname, relative), 'utf8');
   const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS } });
-  const context = { exports: {}, require, ...overrides };
+  const context = { exports: {}, require: name => name.startsWith('./') ? compile(path.relative(__dirname, path.resolve(path.dirname(path.join(__dirname, relative)), `${name}.ts`))) : require(name), ...overrides };
   vm.runInNewContext(compiled.outputText, context);
   return context.exports;
 }
@@ -31,7 +31,7 @@ function fixture(initial = workspace()) {
     if (data.saveGate) await data.saveGate.promise;
     if (data.failSave) throw Error('disk temporarily unavailable');
     if (args.expectedRevision !== data.saved.revision) throw Error('workspace revision conflict');
-    data.saved = { ...data.saved, revision: data.saved.revision + 1, notes: args.notes, project_id: args.projectId };
+    data.saved = { ...data.saved, revision: data.saved.revision + 1, notes: args.notes, notes_document: args.notesDocument ?? data.saved.notes_document, project_id: args.projectId };
     return clone(data.saved);
   };
   data.store = new NoteAutosaver('meeting-one', data.invoke, state => data.emits.push(clone(state)), draft => { data.journal = clone(draft); });
@@ -134,7 +134,7 @@ test('a regressed revision is not used as a retry base', async () => {
 // Minimal hook scheduler exercises lifecycle and navigation without native IPC,
 // recording devices, real browser storage, or timers that outlive a test.
 function hookFixture(invoke) {
-  const slots = [], events = new Map(), storage = new Map(), pushed = [], timers = new Map();
+  const slots = [], events = new Map(), storage = new Map(), pushed = [], timers = new Map(), updateGuards = new Set();
   let index = 0, props, current, pendingRender = false, nextTimer = 0;
   const same = (a, b) => !!a && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
   const react = {
@@ -147,7 +147,7 @@ function hookFixture(invoke) {
   const window = { addEventListener(name, callback) { if (!events.has(name)) events.set(name, new Set()); events.get(name).add(callback); }, removeEventListener(name, callback) { events.get(name)?.delete(callback); }, dispatchEvent(event) { for (const callback of [...(events.get(event.type) ?? [])]) callback(event); return !event.defaultPrevented; } };
   const localStorage = { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) };
   const { useLiveNote } = compile('../../src/hooks/useLiveNote.ts', {
-    require(name) { if (name === 'react') return react; if (name === '@tauri-apps/api/core') return { invoke }; if (name === 'next/navigation') return { useRouter: () => router }; if (name === '@/lib/note-autosaver') return { NoteAutosaver }; throw Error(`Unexpected import ${name}`); },
+    require(name) { if (name === 'react') return react; if (name === '@tauri-apps/api/core') return { invoke }; if (name === 'next/navigation') return { useRouter: () => router }; if (name === '@/lib/note-autosaver') return { NoteAutosaver }; if (name === '@/lib/update-safety') return { registerUpdateSaveGuard: guard => { updateGuards.add(guard); return () => updateGuards.delete(guard); } }; throw Error(`Unexpected import ${name}`); },
     window, localStorage, setTimeout: callback => { timers.set(++nextTimer, callback); return nextTimer; }, clearTimeout: id => timers.delete(id), Event: class { constructor(type) { this.type = type; } },
   });
   function render(next = props) { props = next; index = 0; pendingRender = false; current = useLiveNote(next.id, next.project); const effects = slots.filter(slot => slot?.pending); effects.forEach(slot => { slot.cleanup?.(); }); effects.forEach(slot => { slot.pending = false; slot.cleanup = slot.effect(); }); return current; }
@@ -155,8 +155,29 @@ function hookFixture(invoke) {
   function strictReplay() { const effects = slots.filter(slot => slot?.effect); effects.forEach(slot => slot.cleanup?.()); effects.forEach(slot => { slot.cleanup = slot.effect(); }); }
   function navigate(href, onProceed) { const event = { type: 'xx-before-navigate', detail: { href, onProceed }, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } }; window.dispatchEvent(event); return event; }
   function unmount() { slots.filter(slot => slot?.effect).forEach(slot => slot.cleanup?.()); }
-  return { render, settle, strictReplay, navigate, unmount, pushed, storage, get value() { return current; } };
+  return { render, settle, strictReplay, navigate, unmount, pushed, storage, prepareUpdate: async () => { for (const guard of updateGuards) await guard(); }, get updateGuardCount() { return updateGuards.size; }, get value() { return current; } };
 }
+
+test('app update waits for the newest live-note edit to save and unregisters on close', async () => {
+  const f = fixture(); const hook = hookFixture(f.invoke); hook.render({ id: 'meeting-one' }); await hook.settle();
+  hook.value.update({ notes: 'first pending note' }); await hook.settle(); f.saveGate = gate();
+  let prepared = false; const preparing = hook.prepareUpdate().then(() => { prepared = true; });
+  await tick(); assert.equal(prepared, false);
+  hook.value.update({ notes: 'latest note before updating' }); await hook.settle();
+  f.saveGate.resolve(); await preparing;
+  assert.equal(f.saved.notes, 'latest note before updating');
+  assert.equal(hook.storage.has('xx.note-draft.meeting-one'), false);
+  hook.unmount(); assert.equal(hook.updateGuardCount, 0);
+});
+
+test('app update is blocked by a failed live-note save and keeps the draft', async () => {
+  const f = fixture(); const hook = hookFixture(f.invoke); hook.render({ id: 'meeting-one' }); await hook.settle();
+  hook.value.update({ notes: 'keep my work' }); await hook.settle(); f.failSave = true;
+  await assert.rejects(hook.prepareUpdate(), /disk temporarily unavailable/);
+  assert.equal(f.saved.notes, 'saved notes');
+  assert.equal(JSON.parse(hook.storage.get('xx.note-draft.meeting-one')).notes, 'keep my work');
+  hook.unmount();
+});
 
 test('hook StrictMode replay does not duplicate load or replace notes after typing', async () => {
   const f = fixture(workspace('', 0)); f.loadGate = gate();

@@ -226,6 +226,9 @@ fn wav_bytes(rate: u32, samples: &[f32]) -> Vec<u8> {
 /// files are deleted, even after success. Incomplete trailing journal data is
 /// ignored; a malformed complete record or missing/hash-mismatched WAV fails.
 pub fn recover_capture(directory: &Path) -> Result<Value> {
+    // Archived originals are restored byte-for-byte before the existing
+    // verifier/recovery path runs; playback derivatives are never substitutes.
+    super::source_archive::restore(directory)?;
     let bytes = fs::read(directory.join("timeline.jsonl"))?;
     let last_newline = bytes.iter().rposition(|b| *b == b'\n').map(|i| i + 1).unwrap_or(0);
     let mut chunks = BTreeMap::<String, Vec<Value>>::new();

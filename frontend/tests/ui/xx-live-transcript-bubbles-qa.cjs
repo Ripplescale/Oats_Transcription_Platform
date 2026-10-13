@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const { installCleanLiveFixture } = require('./xx-clean-live-notes-qa.cjs');
+const editorText = editor => editor.evaluate(element => 'value' in element ? element.value : element.innerText.replace(/\n{3,}/g, '\n\n'));
 
 async function main() {
   const output = path.resolve(process.argv[2] || 'frontend/test-artifacts/xx-live-transcript-bubbles');
@@ -27,7 +28,7 @@ async function main() {
   let browser, page;
   const screenshot = async name => { await page.screenshot({ path: path.join(output, name) }); report.screenshots.push(name); };
   const raw = [
-    { id: 'live-system', text: 'आज workshop plan करते हैं. We need 24 sketchbooks.', source_track: 'system', start_seconds: 0, end_seconds: 10 },
+    { id: 'live-system', text: 'Yes.', source_track: 'system', start_seconds: 0, end_seconds: 10 },
     { id: 'live-microphone', text: 'हाँ, मैं studio booking confirm कर दूँगा.\nFriday afternoon works for us.', source_track: 'microphone', start_seconds: 10, end_seconds: 20, quality_flags: ['needs_review'] },
     { id: 'live-legacy', text: 'An older combined track keeps a neutral label.', source_track: 'mixed', start_seconds: 20, end_seconds: 30 },
     { id: 'live-missing', text: 'Source information was not saved.\n\nReference: ' + 'LongReferenceToken'.repeat(40), start_seconds: 30, end_seconds: 40 },
@@ -64,12 +65,42 @@ async function main() {
     await page.getByRole('button', { name: 'Show transcript', exact: true }).click();
     const transcript = page.getByRole('region', { name: 'Live transcript', exact: true });
     await transcript.locator('article[data-segment-id="live-missing"]').waitFor({ state: 'attached' });
+    const setMode = async mode => {
+      await page.getByRole('button', { name: 'Settings', exact: true }).click();
+      await page.getByRole('group', { name: 'Display mode', exact: true }).getByRole('button', { name: mode, exact: true }).click();
+      await page.keyboard.press('Escape');
+    };
+    assert.equal(await transcript.locator('.xx-transcript-source-label').count(), 0);
+    assert.equal(await transcript.getByText('Review suggested', { exact: true }).count(), 0);
+    assert.equal(await transcript.getByText('Processing checks', { exact: true }).count(), 0);
+    assert.ok((await transcript.locator('article').first().boundingBox()).width < (await transcript.locator('article').nth(1).boundingBox()).width / 2, 'A short live User bubble follows its text width');
+    await page.evaluate(() => { window.qaLiveEditor = document.querySelector('[aria-label="Live meeting notes"]'); });
+    const startsBeforeMode = await page.evaluate(() => window.qaCalls.filter(call => /start_.*(recording|transcription)/.test(call.command)).length);
+    await setMode('Dev');
+    assert.equal(await page.evaluate(() => window.qaLiveEditor === document.querySelector('[aria-label="Live meeting notes"]')), true);
+    assert.equal(await page.evaluate(() => window.qaCalls.filter(call => /start_.*(recording|transcription)/.test(call.command)).length), startsBeforeMode);
+    assert.equal((await page.evaluate(() => window.qaCleanState())).recording, true);
     await transcript.getByText('Left: computer audio · Right: microphone. Labels identify audio sources, not people.', { exact: true }).waitFor({ state: 'attached' });
     assert.deepEqual(await transcript.locator('article').evaluateAll(rows => rows.map(row => row.dataset.segmentId)), raw.map(row => row.id));
     assert.deepEqual(await transcript.locator('.xx-transcript-message-text').allTextContents(), raw.map(row => row.text));
     await transcript.locator('article[data-segment-id="live-microphone"]').getByText('00:10', { exact: true }).waitFor({ state: 'attached' });
     await transcript.locator('article[data-segment-id="live-microphone"]').getByText('Review suggested', { exact: true }).waitFor({ state: 'attached' });
     report.checks.push('Live job segments retain original mixed script, multiline text, timestamp order and review indicators with explicit source labels');
+    await transcript.evaluate(element => {
+      const row = element.querySelector('[data-segment-id="live-missing"]');
+      element.scrollTop += row.getBoundingClientRect().top - element.getBoundingClientRect().top + 12;
+    });
+    const anchor = await transcript.evaluate(element => {
+      const edge = element.getBoundingClientRect().top;
+      const row = [...element.querySelectorAll('[data-segment-id]')].find(item => item.getBoundingClientRect().bottom > edge);
+      return { id: row.dataset.segmentId, offset: row.getBoundingClientRect().top - edge };
+    });
+    await setMode('User');
+    const afterMode = await transcript.evaluate((element, id) => ({ offset: element.querySelector(`[data-segment-id="${id}"]`).getBoundingClientRect().top - element.getBoundingClientRect().top }), anchor.id);
+    assert.ok(Math.abs(afterMode.offset - anchor.offset) < 2, 'Switching mode retains the same transcript reading position');
+    assert.equal(await editorText(editor), note);
+    await setMode('Dev');
+    report.checks.push('Live mode switching preserves the current passage, mounted editor, note text, and recording without restarting capture');
 
     for (const [width, height] of [[600, 560], [600, 820], [680, 820], [920, 740]]) {
       await page.setViewportSize({ width, height }); await page.waitForTimeout(150);
@@ -87,10 +118,11 @@ async function main() {
       assert.equal(computer.background, 'rgb(255, 242, 223)'); assert.equal(microphone.background, 'rgb(255, 229, 219)');
       for (const row of [legacy, missing]) {
         assert.equal(row.channel, 'unknown'); assert.equal(row.background, 'rgb(243, 238, 234)');
-        assert.ok(row.x > computer.x && row.x < microphone.x, 'Unknown track remains neutral');
+        const container = await transcript.boundingBox();
+        assert.ok(Math.abs((row.x + row.right) / 2 - (container.x + container.width / 2)) < 15, 'Unknown track remains centered');
       }
       for (const row of layout.rows) {
-        assert.ok(row.x >= 0 && row.right <= width + 1 && row.width > 300, `Readable width for ${row.id}`);
+        assert.ok(row.x >= 0 && row.right <= width + 1 && row.width > 40, `Content width remains within the window for ${row.id}`);
         assert.equal(row.textOverflows, false, `Full long token wraps in ${row.id}`);
       }
       const dock = await page.locator('.xx-note-dock').boundingBox();
@@ -111,7 +143,7 @@ async function main() {
     await transcript.locator('article[data-segment-id="live-incoming"]').waitFor({ state: 'attached' });
     assert.deepEqual(await transcript.locator('article').evaluateAll(rows => rows.map(row => row.dataset.segmentId)), [...raw, incoming].map(row => row.id));
     assert.deepEqual(await transcript.locator('.xx-transcript-message-text').allTextContents(), [...raw, incoming].map(row => row.text));
-    assert.equal(await editor.inputValue(), note);
+    assert.equal(await editorText(editor), note);
     assert.equal((await page.evaluate(() => window.qaCleanState())).live.notes, note);
     await page.getByRole('button', { name: 'Pause recording', exact: true }).click();
     await page.getByRole('button', { name: 'Resume recording', exact: true }).waitFor();
@@ -121,7 +153,7 @@ async function main() {
     assert.equal(await page.locator('.xx-recording-status').innerText(), 'Listening');
     await page.locator('.xx-transcript-toggle').click();
     assert.equal(await page.locator('#live-transcript-drawer').isVisible(), false);
-    assert.equal(await editor.inputValue(), note);
+    assert.equal(await editorText(editor), note);
     await page.getByRole('button', { name: 'Show transcript', exact: true }).click();
     await transcript.locator('article[data-segment-id="live-incoming"]').waitFor({ state: 'attached' });
     await transcript.evaluate(element => { element.scrollTop = 0; });
@@ -159,7 +191,7 @@ async function main() {
     await recoveredBubble.getByText('Recovery attempts', { exact: true }).click();
     await recoveredBubble.getByText('Surrounding audio retry · 00:00–00:30', { exact: true }).waitFor();
     await page.waitForFunction(() => window.qaCleanState().live.segment_metadata['live-context-selected']?.recovery?.method === 'context_window_retry');
-    assert.equal(await editor.inputValue(), note);
+    assert.equal(await editorText(editor), note);
     const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('sttapp.local-workflow.v1')));
     assert.ok(persisted.runs.every(run => !run.job?.segments && !run.job?.superseded_segments), 'browser pointers omit selected and archived transcript text');
     await page.setViewportSize({ width: 680, height: 820 });
@@ -189,7 +221,7 @@ async function main() {
     await page.getByRole('button', { name: 'Stop recording', exact: true }).click();
     await page.waitForURL('**/meeting-details?id=qa-live');
     await page.getByRole('textbox', { name: 'Meeting notes', exact: true }).waitFor();
-    assert.equal(await page.getByRole('textbox', { name: 'Meeting notes', exact: true }).inputValue(), note);
+    assert.equal(await editorText(page.getByRole('textbox', { name: 'Meeting notes', exact: true })), note);
     const savedToggle = page.getByRole('button', { name: 'Show transcript', exact: true });
     await savedToggle.focus(); await savedToggle.press('Enter');
     await page.mouse.move(0, 0);

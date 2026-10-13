@@ -1,0 +1,11 @@
+.xx-main-full { display: flex; flex-direction: column; width: 100%; height: 100dvh; min-width: 0; overflow: hidden; margin: 0; }
+.xx-app-header { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; min-height: 44px; padding: 4px 14px; }
+.xx-app-actions { display: flex; align-items: center; gap: 5px; margin-left: auto; }
+.xx-home-link { display: inline-flex; align-items: center; gap: 7px; min-height: 32px; padding: 4px 8px; border-radius: 8px; color: var(--xx-muted); font-size: 13px; }
+.xx-home-link:hover { color: var(--xx-ink); background: #ffffff80; }
+.xx-settings-menu { width: 260px; border-color: var(--xx-border); background: var(--xx-paper); color: var(--xx-ink); }
+.xx-main-full .xx-notes-home { padding: 0 10px 10px; }
+.xx-main-full .xx-saved-note { padding: 0 10px 10px; }
+.xx-main-full .xx-settings { padding-top: 8px; }
+.xx-main-full .xx-saved-note-canvas > .xx-rich-notes { flex: 1; min-width: 0; }
+@media (max-height: 620px) { .xx-app-header { min-height: 38px; padding-block: 1px; } }

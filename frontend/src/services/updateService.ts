@@ -1,136 +1,91 @@
-/**
- * Update Service
- *
- * Handles automatic software updates using Tauri updater plugin.
- * Provides update checking, downloading, and installation functionality.
- */
+import { invoke } from '@tauri-apps/api/core';
+import { prepareForUpdateInstall } from '@/lib/update-safety';
 
-import { check, Update } from '@tauri-apps/plugin-updater';
-import { relaunch } from '@tauri-apps/plugin-process';
-import { getVersion } from '@tauri-apps/api/app';
-
+export type UpdateState = 'unconfigured' | 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'error';
 export interface UpdateInfo {
-  available: boolean;
-  currentVersion: string;
-  version?: string;
-  date?: string;
-  body?: string;
-  downloadUrl?: string;
+  state: UpdateState;
+  current_version: string;
+  configured?: boolean;
+  version?: string | null;
+  notes?: string | null;
+  published_at?: string | null;
+  downloaded_bytes: number;
+  total_bytes?: number | null;
+  error?: string | null;
+  blocked_reason?: string | null;
 }
+type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const CHECK_KEY = 'oats.updates.last-successful-check';
+const unavailable = (): UpdateInfo => ({ state: 'unconfigured', configured: false, current_version: '', downloaded_bytes: 0 });
 
-export interface UpdateProgress {
-  downloaded: number;
-  total: number;
-  percentage: number;
-}
-
-/**
- * Update Service
- * Singleton service for managing app updates
- */
+/** Metadata checks never download, install, relaunch, or change speech settings. */
 export class UpdateService {
-  private updateCheckInProgress = false;
-  private lastCheckTime: number | null = null;
-  private readonly CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+  private current: UpdateInfo | null = null;
+  private checking?: Promise<UpdateInfo>;
+  private acting = false;
+  private listeners = new Set<(snapshot: UpdateInfo) => void>();
+  private lastCheckTime = 0;
+  constructor(private call: Invoke = invoke, private prepare = prepareForUpdateInstall, private now = Date.now) {}
 
-  /**
-   * Check for available updates
-   * @param force Force check even if recently checked
-   * @returns Promise with update information
-   */
-  async checkForUpdates(force = false): Promise<UpdateInfo> {
-    // Prevent concurrent update checks
-    if (this.updateCheckInProgress) {
-      throw new Error('Update check already in progress');
-    }
-
-    // Skip if checked recently (unless forced)
-    if (!force && this.lastCheckTime) {
-      const timeSinceLastCheck = Date.now() - this.lastCheckTime;
-      if (timeSinceLastCheck < this.CHECK_INTERVAL_MS) {
-        console.log('Skipping update check - checked recently');
-        return {
-          available: false,
-          currentVersion: await getVersion(),
-        };
-      }
-    }
-
-    this.updateCheckInProgress = true;
-    this.lastCheckTime = Date.now();
-
-    try {
-      const currentVersion = await getVersion();
-      const update = await check();
-
-      if (update?.available) {
-        return {
-          available: true,
-          currentVersion,
-          version: update.version,
-          date: update.date,
-          body: update.body,
-        };
-      }
-
-      return {
-        available: false,
-        currentVersion,
-      };
-    } catch (error) {
-      console.error('Failed to check for updates:', error);
-      throw error;
-    } finally {
-      this.updateCheckInProgress = false;
-    }
+  subscribe(listener: (snapshot: UpdateInfo) => void): () => void {
+    this.listeners.add(listener);
+    if (this.current) listener(this.current);
+    return () => { this.listeners.delete(listener); };
   }
-
-  /**
-   * Download and install the available update
-   * @param update The update object from checkForUpdates
-   * @param onProgress Optional progress callback
-   * @returns Promise that resolves when download completes
-   */
-  async downloadAndInstall(
-    update: Update,
-    onProgress?: (progress: UpdateProgress) => void
-  ): Promise<void> {
-    try {
-      // Download the update
-      await update.download();
-
-      // Notify progress if callback provided
-      if (onProgress) {
-        onProgress({ downloaded: 100, total: 100, percentage: 100 });
-      }
-
-      // Install and relaunch
-      await update.install();
-      await relaunch();
-    } catch (error) {
-      console.error('Failed to download/install update:', error);
-      throw error;
-    }
+  accept(snapshot: UpdateInfo): UpdateInfo {
+    if (!snapshot || typeof snapshot.state !== 'string') snapshot = unavailable();
+    this.current = snapshot;
+    for (const listener of this.listeners) listener(snapshot);
+    return snapshot;
   }
-
-  /**
-   * Get the current app version
-   * @returns Promise with version string
-   */
-  async getCurrentVersion(): Promise<string> {
-    return getVersion();
+  async getStatus(): Promise<UpdateInfo> {
+    return this.accept(await this.call<UpdateInfo>('updates_status'));
   }
-
-  /**
-   * Check if an update check was performed recently
-   * @returns true if checked within the interval
-   */
   wasCheckedRecently(): boolean {
-    if (!this.lastCheckTime) return false;
-    const timeSinceLastCheck = Date.now() - this.lastCheckTime;
-    return timeSinceLastCheck < this.CHECK_INTERVAL_MS;
+    let checked = this.lastCheckTime;
+    try { checked = Math.max(checked, Number(window.localStorage.getItem(CHECK_KEY)) || 0); } catch {}
+    const elapsed = this.now() - checked;
+    return checked > 0 && elapsed >= 0 && elapsed < CHECK_INTERVAL_MS;
+  }
+  async checkForUpdates(force = false): Promise<UpdateInfo> {
+    if (this.checking) return this.checking;
+    if (this.acting || ['downloading', 'downloaded', 'installing'].includes(this.current?.state ?? '')) {
+      return this.current ?? this.getStatus();
+    }
+    if (!force && this.wasCheckedRecently()) return this.current ?? this.getStatus();
+    this.checking = this.call<UpdateInfo>('updates_check').then(snapshot => {
+      if (!snapshot || typeof snapshot.state !== 'string') snapshot = unavailable();
+      if (['idle', 'available'].includes(snapshot.state)) {
+        this.lastCheckTime = this.now();
+        try { window.localStorage.setItem(CHECK_KEY, String(this.lastCheckTime)); } catch {}
+      }
+      return this.accept(snapshot);
+    }).finally(() => { this.checking = undefined; });
+    return this.checking;
+  }
+  async download(version: string): Promise<UpdateInfo> {
+    if (this.acting) throw Error('An update action is already running.');
+    this.acting = true;
+    try { return this.accept(await this.call<UpdateInfo>('updates_download', { version })); }
+    finally { this.acting = false; }
+  }
+  async install(version: string): Promise<void> {
+    if (this.acting) throw Error('An update action is already running.');
+    if (this.current?.state !== 'downloaded' || this.current.version !== version) {
+      throw Error('Download this update before installing it.');
+    }
+    this.acting = true;
+    try {
+      await this.prepare();
+      // Native code repeats busy checks under its recording-start lock.
+      // The Windows installer can exit oats; no JS relaunch is used.
+      const result = await this.call<UpdateInfo>('updates_install', { version });
+      if (result) {
+        this.accept(result);
+        if (result.blocked_reason || result.error) throw Error(result.blocked_reason || result.error!);
+      }
+    } finally { this.acting = false; }
   }
 }
-
-// Export singleton instance
 export const updateService = new UpdateService();

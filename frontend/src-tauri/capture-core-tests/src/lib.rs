@@ -1,5 +1,25 @@
 #[path = "../../src/audio/durable_capture.rs"]
 pub mod durable_capture;
+#[path = "../../src/audio/source_archive.rs"]
+pub mod source_archive;
+#[path = "../../src/storage_retention.rs"]
+pub mod storage_retention;
+
+#[cfg(test)]
+#[path = "../../src/dictation/engine.rs"]
+mod dictation_engine;
+#[cfg(test)]
+#[path = "../../src/dictation/pipeline.rs"]
+mod dictation_pipeline;
+#[cfg(test)]
+#[path = "../../src/dictation/process.rs"]
+mod dictation_process;
+#[cfg(test)]
+#[path = "../../src/dictation/live_delivery.rs"]
+mod dictation_live_delivery;
+#[cfg(all(test, windows))]
+#[path = "../../src/dictation/windows.rs"]
+mod dictation_windows;
 
 #[allow(dead_code)]
 mod workspace_components {
@@ -59,6 +79,8 @@ mod syntax_checks {
             ("local_workspace", include_str!("../../src/local_workspace.rs")),
             ("local_transcription", include_str!("../../src/local_transcription.rs")),
             ("lib", include_str!("../../src/lib.rs")),
+            ("dictation", include_str!("../../src/dictation/mod.rs")),
+            ("dictation_capture", include_str!("../../src/dictation/capture.rs")),
         ] {
             syn::parse_file(source).unwrap_or_else(|error| panic!("{name}: {error}"));
         }

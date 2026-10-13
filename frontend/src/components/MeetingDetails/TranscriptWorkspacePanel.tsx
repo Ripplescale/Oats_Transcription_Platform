@@ -13,6 +13,8 @@ import { useLocalWorkflow } from '@/contexts/LocalWorkflowContext';
 import { isTerminalJob, isTrelisProfile, profileLabel, type WorkflowRole } from '@/lib/local-transcription-workflow';
 import { useRouter } from 'next/navigation';
 import { TranscriptProcessingChecks } from '@/components/TranscriptProcessingChecks';
+import { useDisplayMode, useDisplayModeScroll } from '@/contexts/DisplayModeContext';
+import { registerUpdateSaveGuard } from '@/lib/update-safety';
 
 type Review = ReturnType<typeof useTranscriptWorkspace>;
 interface TranscriptLayer { meeting_id: string; title: string; profile?: string | null; workflow_role?: WorkflowRole | null; job_id?: string | null; state: string; primary: boolean }
@@ -28,6 +30,8 @@ export function TranscriptWorkspacePanel({ meeting, review, hasMore, isLoadingMo
   compact?: boolean;
   playback?: { audio: RefObject<HTMLAudioElement>; path: string | null; onError: (message: string) => void };
 }) {
+  const { isDev } = useDisplayMode();
+  const scroll = useDisplayModeScroll<HTMLDivElement>();
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Transcript | null>(null);
@@ -80,6 +84,11 @@ export function TranscriptWorkspacePanel({ meeting, review, hasMore, isLoadingMo
     return layer.profile === 'apex-20' ? 'Apex version' : isTrelisProfile(layer.profile) ? `${profileLabel(layer.profile)} version` : 'Original transcript';
   };
   useEffect(() => { onDraftChange?.(editing !== null); }, [editing, onDraftChange]);
+  useEffect(() => {
+    if (editing !== null) return registerUpdateSaveGuard(async () => {
+      throw new Error('Apply or cancel your transcript correction before installing the update.');
+    });
+  }, [editing]);
   useEffect(() => { setEditing(null); }, [meeting.id]);
   useEffect(() => {
     setDisplayTitle(meeting.title);
@@ -146,7 +155,7 @@ export function TranscriptWorkspacePanel({ meeting, review, hasMore, isLoadingMo
       <div className="xx-eyebrow flex items-center gap-2"><FileText size={13} aria-hidden="true" />{activeRole === 'fallback' ? 'Apex fallback' : activeRole === 'live-final' ? liveTitle : activeRole === 'live-draft' ? 'Live draft' : activeRole === 'final' ? 'Final transcript' : 'Transcript'}</div>
       {!compact && <h1 className="xx-heading text-[24px] leading-tight break-words">{displayTitle}</h1>}
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-[11px] text-[var(--xx-muted)]">{transcriptProfile ? <span className="font-medium text-[var(--xx-accent)]">Transcript: {transcriptProfile}</span> : 'Original script'}<span className="mx-2">·</span>{totalCount ?? meeting.transcripts.length} segments</p>
+        {isDev && <p className="text-[11px] text-[var(--xx-muted)]">{transcriptProfile ? <span className="font-medium text-[var(--xx-accent)]">Transcript: {transcriptProfile}</span> : 'Original script'}<span className="mx-2">·</span>{totalCount ?? meeting.transcripts.length} segments</p>}
         <DropdownMenu><DropdownMenuTrigger asChild><button type="button" className="xx-button-secondary !min-h-8 !px-3 text-xs" disabled={exporting || !review.loaded || editing !== null}><Download size={13} aria-hidden="true" />{exporting ? 'Preparing…' : 'Export'}<ChevronDown size={12} aria-hidden="true" /></button></DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-64 rounded-xl border-[var(--xx-border)] bg-[var(--xx-paper)] text-[var(--xx-ink)] p-2">
             <DropdownMenuLabel className="text-[11px] font-normal text-[var(--xx-muted)]">Complete transcript + current corrections</DropdownMenuLabel>
@@ -159,7 +168,7 @@ export function TranscriptWorkspacePanel({ meeting, review, hasMore, isLoadingMo
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-      <p className="xx-transcript-source-help">Left: computer audio · Right: microphone. Labels identify audio sources, not people.</p>
+      {isDev && <p className="xx-transcript-source-help">Left: computer audio · Right: microphone. Labels identify audio sources, not people.</p>}
       {!!keptCorrections.length && <details className="text-xs leading-6 text-amber-800">
         <summary className="cursor-pointer">{keptCorrections.length} earlier {keptCorrections.length === 1 ? 'correction kept' : 'corrections kept'} for review</summary>
         <p className="mt-2">Recognition changed after these corrections were written. They are kept as reference and have not been applied to the selected transcript.</p>
@@ -177,15 +186,15 @@ export function TranscriptWorkspacePanel({ meeting, review, hasMore, isLoadingMo
       {layers.length > 1 && <nav aria-label="Transcript versions" className="flex max-w-full gap-1 overflow-x-auto rounded-lg border border-[var(--xx-border)] p-1">
         {layers.map(layer => <button type="button" key={layer.meeting_id} aria-current={layer.meeting_id === meeting.id ? 'page' : undefined} className={`shrink-0 rounded-md px-3 py-1.5 text-xs transition-colors ${layer.meeting_id === meeting.id ? 'bg-[var(--xx-canvas)] font-medium text-[var(--xx-accent)]' : 'text-[var(--xx-muted)] hover:bg-[var(--xx-canvas)]'}`} onClick={() => openLayer(layer.meeting_id)}>{layerName(layer)}{['queued', 'not_started'].includes(layer.state) ? ' · pending' : !isTerminalJob(layer.state) ? ' · processing' : layer.state === 'failed' || layer.state === 'stopped' ? ' · needs attention' : ''}</button>)}
       </nav>}
-      {activeRole === 'live-draft' && <p className="text-[11px] leading-4 text-[var(--xx-muted)]">Apex live draft, kept separately from the Trelis final transcript and its corrections.</p>}
-      {activeRole === 'fallback' && <p className="text-[11px] leading-4 text-[var(--xx-muted)]">Apex fallback. This version keeps its own notes and corrections; the Trelis transcript is still available.</p>}
-      {activeRole === 'live-final' && <p className="text-[11px] leading-4 text-[var(--xx-muted)]">Trelis keeps the original Hindi + English script. Raw recognition and your corrections are saved separately.</p>}
+      {isDev && activeRole === 'live-draft' && <p className="text-[11px] leading-4 text-[var(--xx-muted)]">Apex live draft, kept separately from the Trelis final transcript and its corrections.</p>}
+      {isDev && activeRole === 'fallback' && <p className="text-[11px] leading-4 text-[var(--xx-muted)]">Apex fallback. This version keeps its own notes and corrections; the Trelis transcript is still available.</p>}
+      {isDev && activeRole === 'live-final' && <p className="text-[11px] leading-4 text-[var(--xx-muted)]">Trelis keeps the original Hindi + English script. Raw recognition and your corrections are saved separately.</p>}
       {layerError && <p className="text-xs text-amber-800" title={layerError}>Other transcript versions could not be loaded. Your current transcript is still available.</p>}
-      {processing && <p role="status" className="text-[11px] text-[var(--xx-accent)]">{activeRole === 'live-final' && !run.recording ? 'Finishing transcript' : 'Transcribing'} · {Math.round(run.job?.processed_audio_seconds ?? 0)}s processed · {Math.round(run.job?.backlog_seconds ?? 0)}s waiting{run.recording ? ' · recording continues' : ''}</p>}
-      {run && !run.job && !run.error && <p role="status" className="text-[11px] text-[var(--xx-accent)]">{run.pausedByUser ? 'Transcription paused. Your saved audio is retained.' : run.recording && run.preferences.timing === 'after-recording' ? 'Listening. Transcription starts when you stop.' : 'Audio saved. Waiting for the local worker.'}</p>}
+      {processing && <p role="status" className="text-[11px] text-[var(--xx-accent)]">{activeRole === 'live-final' && !run.recording ? 'Finishing transcript' : 'Transcribing'}{isDev && <> · {Math.round(run.job?.processed_audio_seconds ?? 0)}s processed · {Math.round(run.job?.backlog_seconds ?? 0)}s waiting</>}{run.recording ? ' · recording continues' : ''}</p>}
+      {run && !run.job && !run.error && <p role="status" className="text-[11px] text-[var(--xx-accent)]">{run.pausedByUser ? 'Transcription paused. Your saved audio is retained.' : run.recording && run.preferences.timing === 'after-recording' ? 'Listening. Transcription starts when you stop.' : isDev ? 'Audio saved. Waiting for the local worker.' : 'Audio saved. Preparing your transcript.'}</p>}
       {(run?.error || run?.job?.error) && <p role="alert" className="text-xs text-amber-800">Audio is saved. Transcription needs attention — open Tools → Transcription &amp; versions.</p>}
     </header>
-    <div className="xx-transcript-thread min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">
+    <div ref={scroll} className="xx-transcript-thread min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">
       {displacedDraft && editing && <div ref={retainedDraft} role="region" aria-label="Earlier correction draft" data-separate-save="Apply the correction first, then save your changes." className="mb-4 min-w-0 space-y-2 rounded-xl border border-[var(--xx-border)] bg-[var(--xx-canvas)] p-4 text-xs leading-6">
         <p className="font-medium">Your correction draft is still here</p>
         <p>Recognition changed while you were editing. Apply this draft to keep it as a reference for the earlier source; it will not change the selected transcript.</p>
@@ -193,7 +202,7 @@ export function TranscriptWorkspacePanel({ meeting, review, hasMore, isLoadingMo
         <details><summary className="cursor-pointer">Source text for this draft</summary><p className="mt-1 whitespace-pre-wrap">{editing.text}</p></details>
         <div className="flex gap-2"><button className="xx-button-primary text-xs" disabled={review.saving} onClick={() => { review.updateCorrection(editing, draft); setEditing(null); }}>Apply correction</button><button className="xx-button-secondary text-xs" onClick={() => setEditing(null)}>Cancel</button></div>
       </div>}
-      {!meeting.transcripts.length && <div className="py-12 text-center"><Headphones className="mx-auto mb-3 text-[var(--xx-accent)]" size={26} /><p className="text-sm text-[var(--xx-muted)]">{pendingFinal ? 'The final transcript is on its way.' : 'Your words will appear here.'}</p><p className="mt-2 text-xs leading-5 text-[var(--xx-muted)]">{pendingFinal ? 'Trelis processes the saved audio after the call. You can read the Apex live draft while you wait.' : activeRole === 'fallback' ? 'Apex replays the saved recording into this separate version.' : 'Audio is transcribed in the selected chunks plus processing time. Your original recording is retained.'}</p></div>}
+      {!meeting.transcripts.length && <div className="py-12 text-center"><Headphones className="mx-auto mb-3 text-[var(--xx-accent)]" size={26} /><p className="text-sm text-[var(--xx-muted)]">{pendingFinal ? 'The final transcript is on its way.' : 'Your words will appear here.'}</p><p className="mt-2 text-xs leading-5 text-[var(--xx-muted)]">{!isDev ? 'Your saved audio is kept while the transcript is prepared.' : pendingFinal ? 'Trelis processes the saved audio after the call. You can read the Apex live draft while you wait.' : activeRole === 'fallback' ? 'Apex replays the saved recording into this separate version.' : 'Audio is transcribed in the selected chunks plus processing time. Your original recording is retained.'}</p></div>}
       {meeting.transcripts.map(segment => {
         const text = effectiveText(segment, review.workspace.corrections);
         const corrected = text !== segment.text;
@@ -203,30 +212,30 @@ export function TranscriptWorkspacePanel({ meeting, review, hasMore, isLoadingMo
         const metadata = review.workspace.segment_metadata?.[segment.id];
         const speakers = review.workspace.speaker_metadata?.segment_assignments?.[segment.id];
         const stale = review.workspace.corrections.some(item => item.segment_id === segment.id && item.original_text !== segment.text);
-        return <article key={segment.id} data-segment-id={segment.id} data-source-channel={channel} aria-label={`${sourceLabel} at ${recordingTime(segment.audio_start_time)}`} className={`xx-transcript-message xx-transcript-message-${channel} group space-y-2`}>
+        return <article key={segment.id} data-segment-id={segment.id} data-source-channel={channel} aria-label={`${sourceLabel} at ${recordingTime(segment.audio_start_time)}`} className={`xx-transcript-message xx-transcript-message-${channel}${editing?.id === segment.id && editing.text === segment.text ? ' is-editing' : ''} group space-y-2`}>
           <div className="xx-transcript-message-meta flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[var(--xx-muted)]">
             <button type="button" className="rounded px-1 -ml-1 font-mono text-[var(--xx-accent)] hover:bg-[var(--xx-canvas)] focus-visible:outline focus-visible:outline-2 disabled:opacity-40" disabled={!playablePath || segment.audio_start_time == null} onClick={() => seek(segment.audio_start_time!)} title="Play from this segment boundary">{recordingTime(segment.audio_start_time)}</button>
-            {metadata?.recovery?.method === 'context_window_retry' && segment.audio_end_time != null && <span className="font-mono -ml-1">–{recordingTime(segment.audio_end_time)}</span>}
-            <span className="xx-transcript-source-label" title="Recording source; this label does not identify a person.">{sourceLabel}</span>
+            {isDev && metadata?.recovery?.method === 'context_window_retry' && segment.audio_end_time != null && <span className="font-mono -ml-1">–{recordingTime(segment.audio_end_time)}</span>}
+            {isDev && <span className="xx-transcript-source-label" title="Recording source; this label does not identify a person.">{sourceLabel}</span>}
             {segment.speaker_id && <span>{segment.speaker_id}</span>}
             {corrected && <span className="text-emerald-700">Corrected</span>}
-            {(!!metadata?.quality_flags?.length || metadata?.recovery?.requires_review) && <span className="text-amber-700">Review suggested</span>}
-            <button type="button" className="ml-auto inline-flex items-center gap-1 rounded px-2 py-1 text-[var(--xx-accent)] hover:bg-[var(--xx-canvas)] focus-visible:outline focus-visible:outline-2 disabled:opacity-40" disabled={!review.loaded || review.saving || editing !== null} onClick={() => { setEditing({ ...segment }); setDraft(text); }}><Pencil size={11} aria-hidden="true" />Edit</button>
+            {isDev && (!!metadata?.quality_flags?.length || metadata?.recovery?.requires_review) && <span className="text-amber-700">Review suggested</span>}
+            <button type="button" aria-label="Edit" title="Edit transcript text" className={`ml-auto inline-flex items-center gap-1 rounded px-2 py-1 text-[var(--xx-accent)] hover:bg-[var(--xx-canvas)] focus-visible:outline focus-visible:outline-2 disabled:opacity-40${isDev ? '' : ' xx-transcript-edit'}`} disabled={!review.loaded || review.saving || editing !== null} onClick={() => { setEditing({ ...segment }); setDraft(text); }}><Pencil size={11} aria-hidden="true" />{isDev && 'Edit'}</button>
           </div>
           {editing?.id === segment.id && editing.text === segment.text ? <div data-separate-save="Apply the correction first, then save your changes." className="space-y-2">
             <textarea aria-label="Correct transcript text" className="w-full min-h-32 border border-[var(--xx-border)] bg-white/50 rounded-xl p-3 text-[15px] leading-7 focus:outline-[var(--xx-accent)]" value={draft} onChange={event => setDraft(event.target.value)} />
             <div className="flex gap-2"><button className="xx-button-primary text-xs" disabled={review.saving} onClick={() => { review.updateCorrection(segment, draft); setEditing(null); }}>Apply correction</button><button className="xx-button-secondary text-xs" onClick={() => setEditing(null)}>Cancel</button></div>
           </div> : <p className="xx-transcript-message-text whitespace-pre-wrap text-[15px] leading-[1.85]">{text}</p>}
-          {corrected && <details className="text-xs text-gray-500"><summary className="cursor-pointer">Original recognition</summary><p className="whitespace-pre-wrap leading-6 mt-2">{segment.text}</p></details>}
+          {isDev && corrected && <details className="text-xs text-gray-500"><summary className="cursor-pointer">Original recognition</summary><p className="whitespace-pre-wrap leading-6 mt-2">{segment.text}</p></details>}
           {stale && <p className="text-xs text-amber-700">A saved correction belongs to an earlier recognition result and was not applied.</p>}
-          {!!speakers?.speaker_candidates.length && <p className="text-[11px] text-[var(--xx-muted)]" title="Estimated speakers heard in this audio window. Individual words are not assigned to a person.">Heard in this window: {speakers.speaker_candidates.map(id => review.workspace.speaker_names?.[id] || id).join(', ')}{speakers.has_overlap ? ' · overlapping speech' : ''}</p>}
-          <TranscriptProcessingChecks metadata={metadata} startSeconds={segment.audio_start_time} endSeconds={segment.audio_end_time} />
+          {isDev && !!speakers?.speaker_candidates.length && <p className="text-[11px] text-[var(--xx-muted)]" title="Estimated speakers heard in this audio window. Individual words are not assigned to a person.">Heard in this window: {speakers.speaker_candidates.map(id => review.workspace.speaker_names?.[id] || id).join(', ')}{speakers.has_overlap ? ' · overlapping speech' : ''}</p>}
+          {isDev && <TranscriptProcessingChecks metadata={metadata} startSeconds={segment.audio_start_time} endSeconds={segment.audio_end_time} />}
         </article>;
       })}
       {hasMore && <Button variant="outline" className="w-full" disabled={isLoadingMore} onClick={onLoadMore}>{isLoadingMore ? 'Loading…' : 'Load more transcript'}</Button>}
     </div>
     {!playback && <footer className="shrink-0 border-t border-[var(--xx-border)] px-4 py-3 space-y-2 bg-[var(--xx-paper)]">
-      <div className="flex items-center justify-between gap-3 text-[11px] text-[var(--xx-muted)]"><span className="flex items-center gap-2"><Headphones size={13} aria-hidden="true" /> Recording</span><span className="inline-flex items-center gap-1" title="Times identify audio windows, not individual words. Track labels do not identify people. Original recognition script is preserved."><Info size={12} aria-hidden="true" /> Window timestamps</span></div>
+      <div className="flex items-center justify-between gap-3 text-[11px] text-[var(--xx-muted)]"><span className="flex items-center gap-2"><Headphones size={13} aria-hidden="true" /> Recording</span>{isDev && <span className="inline-flex items-center gap-1" title="Times identify audio windows, not individual words. Track labels do not identify people. Original recognition script is preserved."><Info size={12} aria-hidden="true" /> Window timestamps</span>}</div>
       {audioPath ? <audio ref={audio} key={audioPath} controls preload="metadata" src={convertFileSrc(audioPath)} className="w-full h-10" onError={() => setAudioError('The saved audio could not be played. Open its recording folder to inspect it.')} /> : <p className="text-xs text-gray-500">No playable recording is linked to this meeting.</p>}
       {audioError && <p role="alert" className="text-xs text-amber-700">{audioError}</p>}
     </footer>}

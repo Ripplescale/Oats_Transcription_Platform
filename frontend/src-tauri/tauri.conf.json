@@ -2,7 +2,7 @@
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
     "productName": "oats",
     "mainBinaryName": "xx",
-    "version": "0.7.4",
+    "version": "0.8.4",
     "identifier": "com.sttapp.local",
     "build": {
         "frontendDist": "../out",
@@ -44,6 +44,12 @@
                 ]
             },
             "capabilities": [
+                {
+                    "identifier": "dictation",
+                    "description": "Focus-preserving dictation controls; custom commands validate window and session",
+                    "windows": ["dictation"],
+                    "permissions": []
+                },
                 {
                     "identifier": "meeting-prompt",
                     "description": "Local call prompt; custom commands validate its window label",
@@ -123,5 +129,10 @@
             "hardenedRuntime": true
         }
     },
-    "plugins": {}
+    "plugins": {
+        "updater": {
+            "pubkey": "",
+            "requireSignedVersion": true
+        }
+    }
 }

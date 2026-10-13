@@ -17,7 +17,7 @@ import time
 import wave
 import contextlib
 
-from sttbench.manifest import digest, file_digest, read_json, write_json
+from sttbench.manifest import digest, file_digest, read_json, write_json as _write_json
 from sttbench.normalization import basic_tokens
 from sttbench.runtime import transcribe
 from sttbench.runtime.api import warmup
@@ -27,6 +27,16 @@ PROFILES = {'apex-15': ('apex', 15), 'apex-20': ('apex', 20), 'apex-30': ('apex'
             'trelis-5': ('trelis', 5), 'trelis-10': ('trelis', 10),
             'trelis-15': ('trelis', 15), 'trelis-20': ('trelis', 20)}
 TRACKS = ('microphone', 'system')
+
+
+def write_json(path: Path, value):
+    """Publish this worker's status checkpoints without indentation overhead.
+
+    Other documents keep the manifest writer's existing default formatting.
+    Historical jobs retain their immutable worker, so their checkpoint bytes and
+    downstream speaker identity bindings are never rewritten by this change.
+    """
+    _write_json(path, value, compact=True)
 
 
 def contained(root: Path, relative: str) -> Path:
@@ -346,6 +356,21 @@ def _pending_recovery(status, track):
                  and segment.get('recovery', {}).get('state') == 'waiting_for_context'), None)
 
 
+def _idle_publication_key(status):
+    """Constant-size idle state; never copy/serialize a growing transcript.
+
+    Pending recovery returns without mutation while context is unavailable.
+    Once ready, every attempt is checkpointed unconditionally and a completed
+    recovery advances segments_revision before returning to the main loop.
+    updated_at also distinguishes attempt checkpoints at the same revision.
+    """
+    return (status.get('state'), status.get('phase'), status.get('segments_revision'),
+            *(status.get('cursors', {}).get(track, 0) for track in TRACKS),
+            status.get('available_audio_seconds'), status.get('processed_audio_seconds'),
+            status.get('backlog_seconds'), status.get('capture_finalized'),
+            status.get('capture_event_count'), status.get('updated_at'))
+
+
 class _RecoveryInterrupted(Exception):
     """Keep a provisional core and completed attempts when capture is stopped."""
 
@@ -582,6 +607,7 @@ def run_locked(config_path: Path, request_path: Path):
     socket.socket.connect = socket.socket.connect_ex = socket.create_connection = no_network
     stop = job/'stop.request'
     status.pop('error', None)
+    last_idle_publication = None
     try:
         if runtime.get('backend') == 'openvino' and not stop.exists() and parent_alive():
             # Compile while the independent recorder accumulates its first window.
@@ -648,6 +674,7 @@ def run_locked(config_path: Path, request_path: Path):
                 status['updated_at'] = datetime.now(timezone.utc).isoformat()
                 write_json(status_path, status)
                 progressed = True
+                last_idle_publication = None
                 if stop.exists() or not parent_alive(): break
             if stop.exists() or not parent_alive():
                 status['state'] = 'stopped'; break
@@ -657,7 +684,11 @@ def run_locked(config_path: Path, request_path: Path):
             if not progressed:
                 phase = 'waiting_for_context' if any(_pending_recovery(status, t) for t in TRACKS) else 'waiting_for_audio'
                 status.update(state='waiting_for_audio', phase=phase)
-                write_json(status_path, status); time.sleep(.5)
+                idle_key = _idle_publication_key(status)
+                if idle_key != last_idle_publication:
+                    write_json(status_path, status)
+                    last_idle_publication = idle_key
+                time.sleep(.5)
     except _RecoveryInterrupted:
         status['state'] = 'stopped'
     except Exception as exc:

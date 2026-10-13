@@ -5,6 +5,8 @@ param(
     [string]$LabRoot = '',
     [string]$DataRoot = (Join-Path $env:LOCALAPPDATA 'STTApp'),
     [string]$TargetRoot = 'C:\STTBuild\target',
+    [string]$TauriCliPath = '',
+    [switch]$CreateUpdaterArtifacts,
     [switch]$DebugBuild,
     [switch]$SkipFrontend
 )
@@ -12,6 +14,16 @@ $ErrorActionPreference = 'Stop'
 $nativeRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $frontendRoot = (Resolve-Path (Join-Path $nativeRoot '..')).Path
 $repositoryRoot = (Resolve-Path (Join-Path $frontendRoot '..')).Path
+$updaterPublicKey = ''
+if ($CreateUpdaterArtifacts) {
+    $updaterPublicKey = [string]$env:OATS_UPDATER_PUBLIC_KEY
+    if (-not $updaterPublicKey.Trim()) { throw 'Signed updater artifacts require OATS_UPDATER_PUBLIC_KEY before building.' }
+    $updaterPublicKey = $updaterPublicKey.Trim()
+    $validationNode = (Get-Command node.exe -ErrorAction Stop).Source
+    $validateKey = 'require(process.argv[1]).parsePublicKey(process.env.OATS_UPDATER_PUBLIC_KEY);'
+    $validationOutput = & $validationNode -e $validateKey (Join-Path $repositoryRoot 'scripts/windows-update-feed.cjs') 2>&1
+    if ($LASTEXITCODE -ne 0) { throw 'OATS_UPDATER_PUBLIC_KEY is not a valid Tauri public key. No build was started.' }
+}
 if (-not $LabRoot) { $LabRoot = Join-Path $DataRoot 'lab' }
 if (-not [System.IO.Path]::IsPathRooted($DataRoot) -or $DataRoot -match '(^|[\\/])OneDrive([^\\/]*)([\\/]|$)') {
     throw 'DataRoot must be an absolute local path outside OneDrive.'
@@ -88,19 +100,26 @@ try {
     if ($Mode -eq 'Check') {
         & $cargoExe check --locked --package xx --target x86_64-pc-windows-msvc -j 1
     } else {
-        $tauriCli = Join-Path $frontendRoot 'node_modules\@tauri-apps\cli\tauri.js'
+        $tauriCli = if ($TauriCliPath) { (Resolve-Path -LiteralPath $TauriCliPath).Path } else { Join-Path $frontendRoot 'node_modules\@tauri-apps\cli\tauri.js' }
         if (-not (Test-Path -LiteralPath $tauriCli)) { throw 'Install the frozen frontend lockfile before building.' }
         $nodeExe = (Get-Command node.exe -ErrorAction Stop).Source
         $tauriArguments = @($tauriCli, 'build', '--target', 'x86_64-pc-windows-msvc')
         if ($DebugBuild) { $tauriArguments += '--debug' }
         if ($Mode -eq 'Build') { $tauriArguments += '--no-bundle' }
         else { $tauriArguments += @('--bundles', 'nsis') }
+        $configOverrides = @{}
+        if ($CreateUpdaterArtifacts) {
+            $configOverrides.bundle = @{ createUpdaterArtifacts = $true }
+            # CLI signing reads configuration independently of the native override.
+            $configOverrides.plugins = @{ updater = @{ pubkey = $updaterPublicKey; requireSignedVersion = $true } }
+        }
         if ($SkipFrontend) {
             if (-not (Test-Path -LiteralPath (Join-Path $frontendRoot 'out\index.html'))) {
                 throw 'SkipFrontend requires an existing checked frontend/out export.'
             }
-            $tauriArguments += @('--config', '{"build":{"beforeBuildCommand":""}}')
+            $configOverrides.build = @{ beforeBuildCommand = '' }
         }
+        if ($configOverrides.Count) { $tauriArguments += @('--config', ($configOverrides | ConvertTo-Json -Depth 8 -Compress)) }
         $tauriArguments += @('--', '--locked', '-j', '1')
         & $nodeExe @tauriArguments
     }

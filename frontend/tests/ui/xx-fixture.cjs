@@ -57,7 +57,7 @@ async function installFixture(page) {
         if (command === 'save_transcript_workspace') {
           const current = args.meetingId === 'qa-draft' ? draftWorkspace : workspace;
           if (args.expectedRevision !== current.revision) throw Error('Revision conflict');
-          const saved = { ...current, revision: current.revision + 1, notes: args.notes, corrections: args.corrections, project_id: args.projectId, speaker_names: args.speakerNames };
+          const saved = { ...current, revision: current.revision + 1, notes: args.notes, notes_document: args.clearNotesDocument ? null : args.notesDocument ?? current.notes_document, corrections: args.corrections, project_id: args.projectId, speaker_names: args.speakerNames };
           if (args.meetingId === 'qa-draft') draftWorkspace = saved; else workspace = saved;
           return saved;
         }

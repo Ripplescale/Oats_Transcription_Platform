@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Button } from '@/components/ui/button';
+import { registerUpdateSaveGuard } from '@/lib/update-safety';
 
 interface VaultEntry {
   id: string;
@@ -26,6 +27,11 @@ export function ProjectVaultPanel({ selectedProject, onSelectProject, disabled }
   const [entry, setEntry] = useState<VaultEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (entry !== null || saving) return registerUpdateSaveGuard(async () => {
+      throw new Error('Save or cancel your project reference before installing the update.');
+    });
+  }, [entry, saving]);
   useEffect(() => {
     if (!opened) return;
     let cancelled = false;

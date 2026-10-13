@@ -1,11 +1,11 @@
-'use client'
+'use client';
 
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
-import { UpdateInfo } from '@/services/updateService';
+import { updateService, type UpdateInfo } from '@/services/updateService';
 import { UpdateDialog } from './UpdateDialog';
-import { setUpdateDialogCallback, showUpdateNotification } from './UpdateNotification';
-import { LOCAL_TRANSCRIPT_ONLY } from '@/lib/local-workflow';
+import { showUpdateNotification } from './UpdateNotification';
 
 interface UpdateCheckContextType {
   updateInfo: UpdateInfo | null;
@@ -13,68 +13,40 @@ interface UpdateCheckContextType {
   checkForUpdates: (force?: boolean) => Promise<void>;
   showUpdateDialog: () => void;
 }
-
 const UpdateCheckContext = createContext<UpdateCheckContextType | undefined>(undefined);
 
 export function UpdateCheckProvider({ children }: { children: React.ReactNode }) {
   const [showDialog, setShowDialog] = useState(false);
-
-  const handleShowDialog = useCallback(() => {
-    setShowDialog(true);
+  const notified = useRef(new Set<string>());
+  const showUpdateDialog = useCallback(() => { setShowDialog(true); }, []);
+  const { updateInfo, isChecking, error, checkForUpdates } = useUpdateCheck();
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<UpdateInfo>('updates-status', event => updateService.accept(event.payload)).then(stop => {
+      if (disposed) stop(); else unlisten = stop;
+    }).catch(() => {});
+    return () => { disposed = true; unlisten?.(); };
   }, []);
-
-  const { updateInfo, isChecking, checkForUpdates } = useUpdateCheck({
-    checkOnMount: !LOCAL_TRANSCRIPT_ONLY,
-    showNotification: true,
-    onUpdateAvailable: (info) => {
-      // Show notification, dialog will be shown when user clicks notification
-      showUpdateNotification(info, handleShowDialog);
-    },
-  });
-
   useEffect(() => {
-    // Register the callback so UpdateNotification can trigger the dialog
-    setUpdateDialogCallback(handleShowDialog);
-    return () => {
-      setUpdateDialogCallback(() => {});
-    };
-  }, [handleShowDialog]);
-
-  // Listen for tray menu events
+    if (updateInfo?.state === 'available' && updateInfo.version && !notified.current.has(updateInfo.version)) {
+      notified.current.add(updateInfo.version);
+      showUpdateNotification(updateInfo, showUpdateDialog);
+    }
+  }, [updateInfo, showUpdateDialog]);
   useEffect(() => {
-    if (LOCAL_TRANSCRIPT_ONLY) return;
-    const handleTrayCheck = () => {
-      checkForUpdates(true); // Force check from tray
-      setShowDialog(true);
-    };
-
-    window.addEventListener('check-updates-from-tray', handleTrayCheck);
-    return () => window.removeEventListener('check-updates-from-tray', handleTrayCheck);
-  }, [checkForUpdates]);
-
-  return (
-    <UpdateCheckContext.Provider
-      value={{
-        updateInfo,
-        isChecking,
-        checkForUpdates,
-        showUpdateDialog: handleShowDialog,
-      }}
-    >
-      {children}
-      <UpdateDialog
-        open={showDialog}
-        onOpenChange={setShowDialog}
-        updateInfo={updateInfo}
-      />
-    </UpdateCheckContext.Provider>
-  );
+    const fromTray = () => { showUpdateDialog(); void checkForUpdates(true); };
+    window.addEventListener('check-updates-from-tray', fromTray);
+    return () => window.removeEventListener('check-updates-from-tray', fromTray);
+  }, [checkForUpdates, showUpdateDialog]);
+  return <UpdateCheckContext.Provider value={{ updateInfo, isChecking, checkForUpdates, showUpdateDialog }}>
+    {children}
+    <UpdateDialog open={showDialog} onOpenChange={setShowDialog} updateInfo={updateInfo}
+      checkError={error} onCheck={() => checkForUpdates(true)} />
+  </UpdateCheckContext.Provider>;
 }
-
 export function useUpdateCheckContext() {
   const context = useContext(UpdateCheckContext);
-  if (context === undefined) {
-    throw new Error('useUpdateCheckContext must be used within UpdateCheckProvider');
-  }
+  if (!context) throw Error('useUpdateCheckContext must be used within UpdateCheckProvider');
   return context;
 }

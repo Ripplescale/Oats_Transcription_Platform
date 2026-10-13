@@ -35,7 +35,7 @@ pub use super::transcription::TranscriptUpdate;
 
 // Simple recording state tracking
 static IS_RECORDING: AtomicBool = AtomicBool::new(false);
-static CAPTURE_START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static CAPTURE_START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// True for the whole `stop_recording` tail (manager taken -> `recording-stopped`
 /// emitted). `IS_RECORDING` must stay true through the tail — the frontend polls
@@ -316,7 +316,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         meeting_name
     );
 
+    crate::local_transcription::prioritize_user_work();
     let engine_lifecycle_guard = CAPTURE_START_LOCK.lock().await;
+    let _update_start = crate::updates::start_lease()?;
+    if crate::dictation::is_busy() { return Err("Finish or cancel dictation before starting a meeting recording.".into()); }
+    crate::dictation::release_idle_model();
 
     // Check if already recording
     let current_recording_state = IS_RECORDING.load(Ordering::SeqCst);
@@ -484,7 +488,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         mic_device_name, system_device_name, meeting_name
     );
 
+    crate::local_transcription::prioritize_user_work();
     let engine_lifecycle_guard = CAPTURE_START_LOCK.lock().await;
+    let _update_start = crate::updates::start_lease()?;
+    if crate::dictation::is_busy() { return Err("Finish or cancel dictation before starting a meeting recording.".into()); }
+    crate::dictation::release_idle_model();
 
     // Check if already recording
     let current_recording_state = IS_RECORDING.load(Ordering::SeqCst);
@@ -684,6 +692,10 @@ fn spawn_capture_health_monitor<R: Runtime>(app: AppHandle<R>, session: Arc<supe
 
 /// Check if recording is active
 pub async fn is_recording() -> bool {
+    IS_RECORDING.load(Ordering::SeqCst)
+}
+
+pub(crate) fn capture_in_progress() -> bool {
     IS_RECORDING.load(Ordering::SeqCst)
 }
 
@@ -1402,6 +1414,7 @@ fn checked_capture_directory(directory: &std::path::Path) -> Result<std::path::P
 
 #[tauri::command]
 pub async fn recover_local_capture(session_dir: String) -> Result<serde_json::Value, String> {
+    crate::local_transcription::prioritize_user_work();
     let _capture_guard = CAPTURE_START_LOCK.lock().await;
     let directory = checked_capture_directory(std::path::Path::new(&session_dir))?;
     let active = RECORDING_MANAGER.lock().unwrap().as_ref().and_then(|m|m.capture_info());

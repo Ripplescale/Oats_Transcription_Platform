@@ -1,0 +1,18 @@
+/* Import after xx.css. Mode changes keep the same editor and recording components mounted. */
+.xx-display-mode { display: inline-flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid var(--xx-border); border-radius: 10px; background: var(--xx-paper); }
+.xx-display-mode button { min-height: 30px; padding: 4px 10px; border-radius: 7px; color: var(--xx-muted); font-size: 12px; line-height: 1.4; }
+.xx-display-mode button[aria-pressed="true"] { color: var(--xx-accent); background: var(--xx-canvas); font-weight: 600; }
+.xx-display-mode button:focus-visible { outline: 2px solid var(--xx-accent); outline-offset: 2px; }
+
+/* No fixed reading width: a short sentence gets a short bubble in either mode. */
+.xx-transcript-message { width: fit-content; max-width: min(86%, 680px); min-width: 0; min-height: 0; padding: 10px 13px; }
+.xx-transcript-message.is-editing { width: min(86%, 680px); }
+.xx-transcript-message-meta { row-gap: 2px; }
+.xx-transcript-message-text { margin-block: 0; }
+.xx-transcript-message-meta + .xx-transcript-message-text { margin-top: 4px; }
+.xx-transcript-message-text { overflow-wrap: anywhere; }
+.xx-transcript-edit { padding-inline: 4px !important; }
+@media (max-width: 680px) {
+  .xx-transcript-message { width: fit-content; max-width: 92%; padding: 9px 11px; }
+  .xx-transcript-message.is-editing { width: 92%; }
+}

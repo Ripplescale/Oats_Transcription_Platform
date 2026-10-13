@@ -1,0 +1,91 @@
+name: Publish signed oats Windows release
+
+# A deliberate version tag publishes a release after one-time activation.
+# Ordinary branch pushes do not build, sign or publish an app update.
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oats-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-release:
+    if: github.repository == 'Ripplescale/Hinglish-Transcription-Platform' && vars.OATS_RELEASES_ENABLED == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.22.3'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Validate release tag and public configuration
+        env:
+          OATS_RELEASE_PUBLIC_KEY: ${{ vars.OATS_UPDATER_PUBLIC_KEY }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_TAG -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { throw 'Expected a stable vX.Y.Z tag.' }
+          if (-not $env:OATS_RELEASE_PUBLIC_KEY) { throw 'Configure the public updater key repository variable first.' }
+          $version = $env:RELEASE_TAG.Substring(1)
+          $notes = Join-Path $env:GITHUB_WORKSPACE "docs/releases/$version.md"
+          if (-not (Test-Path -LiteralPath $notes -PathType Leaf)) { throw 'Commit release notes for this exact version before tagging.' }
+          $publicKeyPath = Join-Path $env:RUNNER_TEMP 'oats-updater.pub'
+          [IO.File]::WriteAllText($publicKeyPath, $env:OATS_RELEASE_PUBLIC_KEY.Trim(), [Text.UTF8Encoding]::new($false))
+          "OATS_RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+          "OATS_RELEASE_KEY_PATH=$publicKeyPath" >> $env:GITHUB_ENV
+          "OATS_RELEASE_NOTES=$notes" >> $env:GITHUB_ENV
+      - name: Provision public build dependencies
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm install --global pnpm@9.15.9 --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Could not provision pnpm.' }
+          rustup toolchain install stable --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Could not provision Rust.' }
+          rustup default stable
+          if ($LASTEXITCODE -ne 0) { throw 'Could not select the Rust toolchain.' }
+          $clangRoot = Join-Path $env:RUNNER_TEMP 'oats-clang'
+          python -m pip install --only-binary=:all: --no-deps --require-hashes --target $clangRoot -r scripts/windows-release-build-requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'The verified libclang wheel could not be installed.' }
+          $libclang = Join-Path $clangRoot 'clang/native'
+          if (-not (Test-Path -LiteralPath (Join-Path $libclang 'libclang.dll'))) { throw 'libclang.dll was not provisioned.' }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $buildTools = (& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          if (-not $buildTools) { throw 'Microsoft C++ Build Tools were not found.' }
+          "OATS_RELEASE_CLANG=$libclang" >> $env:GITHUB_ENV
+          "OATS_RELEASE_BUILD_TOOLS=$buildTools" >> $env:GITHUB_ENV
+      - name: Build and verify signed installer and feed
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.OATS_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.OATS_UPDATER_PRIVATE_KEY_PASSWORD }}
+        run: |
+          ./scripts/package-windows-release.ps1 -Version $env:OATS_RELEASE_VERSION -PublicKeyPath $env:OATS_RELEASE_KEY_PATH -ReleaseNotesPath $env:OATS_RELEASE_NOTES -BuildToolsPath $env:OATS_RELEASE_BUILD_TOOLS -LibClangPath $env:OATS_RELEASE_CLANG -StageRoot C:\OatsBuild -OutputDirectory C:\OatsRelease
+      - name: Publish the complete verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $existing = & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json tagName 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'This release already exists. Never overwrite published or partial release files automatically.' }
+          $asset = "oats_$($env:OATS_RELEASE_VERSION)_x64-setup.exe"
+          $files = @("C:\OatsRelease\$asset", "C:\OatsRelease\$asset.sig", 'C:\OatsRelease\latest.json', 'C:\OatsRelease\SHA256SUMS.txt', 'C:\OatsRelease\SOURCE-COMMIT.txt')
+          & gh release create $env:RELEASE_TAG @files --repo $env:GITHUB_REPOSITORY --verify-tag --draft --title "oats $($env:OATS_RELEASE_VERSION)" --notes-file $env:OATS_RELEASE_NOTES
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed. Any draft remains unpublished for review.' }
+          & gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'The complete release remains a draft; publication failed.' }

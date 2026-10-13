@@ -99,6 +99,7 @@ pub async fn api_save_meeting_summary<R: Runtime>(
     summary: serde_json::Value,
     _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let _update_save = crate::updates::start_lease()?;
     log_info!(
         "api_save_meeting_summary (native) called for meeting_id: {}",
         meeting_id

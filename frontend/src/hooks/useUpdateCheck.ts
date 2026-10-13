@@ -1,65 +1,20 @@
-import { useEffect, useState } from 'react';
-import { updateService, UpdateInfo } from '@/services/updateService';
-import { showUpdateNotification } from '@/components/UpdateNotification';
+import { useCallback, useEffect, useState } from 'react';
+import { updateService, type UpdateInfo } from '@/services/updateService';
 
-interface UseUpdateCheckOptions {
-  checkOnMount?: boolean;
-  showNotification?: boolean;
-  onUpdateAvailable?: (info: UpdateInfo) => void;
-}
-
-export function useUpdateCheck(options: UseUpdateCheckOptions = {}) {
-  const {
-    checkOnMount = true,
-    showNotification = true,
-    onUpdateAvailable,
-  } = options;
-
+export function useUpdateCheck() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
-  const [isChecking, setIsChecking] = useState(false);
-
-  const checkForUpdates = async (force = false) => {
-    // Skip if checked recently (unless forced)
-    if (!force && updateService.wasCheckedRecently()) {
-      return;
-    }
-
-    setIsChecking(true);
-    try {
-      const info = await updateService.checkForUpdates(force);
-      setUpdateInfo(info);
-
-      if (info.available) {
-        if (onUpdateAvailable) {
-          onUpdateAvailable(info);
-        } else if (showNotification) {
-          showUpdateNotification(info, () => {
-            // This will be handled by the component that uses this hook
-          });
-        }
-      }
-    } catch (error) {
-      console.error('Failed to check for updates:', error);
-      // Silently fail on startup checks to avoid disrupting user experience
-    } finally {
-      setIsChecking(false);
-    }
-  };
-
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => updateService.subscribe(setUpdateInfo), []);
+  const checkForUpdates = useCallback(async (force = false) => {
+    setError(null);
+    try { await updateService.checkForUpdates(force); }
+    catch (reason) { setError('Could not check for updates. ' + String(reason)); }
+  }, []);
   useEffect(() => {
-    if (checkOnMount) {
-      // Delay the check slightly to avoid blocking app startup
-      const timer = setTimeout(() => {
-        checkForUpdates(false);
-      }, 2000); // Check 2 seconds after mount
-
-      return () => clearTimeout(timer);
-    }
-  }, [checkOnMount]);
-
-  return {
-    updateInfo,
-    isChecking,
-    checkForUpdates,
-  };
+    void updateService.getStatus().catch(() => {});
+    const first = window.setTimeout(() => { void checkForUpdates(); }, 15_000);
+    const daily = window.setInterval(() => { void checkForUpdates(); }, 24 * 60 * 60 * 1000);
+    return () => { window.clearTimeout(first); window.clearInterval(daily); };
+  }, [checkForUpdates]);
+  return { updateInfo, isChecking: updateInfo?.state === 'checking', error, checkForUpdates };
 }

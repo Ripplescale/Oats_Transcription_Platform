@@ -108,7 +108,9 @@ def assess_window(path: Path, config: dict | None) -> dict:
         peak = float(np.max(np.abs(samples))) if len(samples) else 0
         gain = min(max_gain, max(1., boost_peak / max(peak, 1e-12)))
         raw = _probabilities(session, samples, 1., interface)
-        boosted = _probabilities(session, samples, gain, interface)
+        # Unity gain produces the same samples and starts from the same reset
+        # recurrent state. Reuse the complete pass without losing diagnostics.
+        boosted = raw if gain == 1. else _probabilities(session, samples, gain, interface)
         skip = max(raw) < threshold and max(boosted) < threshold
         frame_samples = FRAME_SAMPLES
         combined = np.maximum(raw, boosted)

@@ -1,4 +1,5 @@
 import type { Transcript, PaginatedTranscriptsResponse } from '@/types';
+import { stableNotesValue, type NotesDocument } from './rich-notes';
 
 export interface TranscriptCorrection {
   segment_id: string;
@@ -51,6 +52,7 @@ export interface TranscriptWorkspace {
   meeting_id: string;
   revision: number;
   notes: string;
+  notes_document?: NotesDocument | null;
   corrections: TranscriptCorrection[];
   project_id: string | null;
   profile: string | null;
@@ -76,8 +78,19 @@ export function emptyWorkspace(meetingId: string): TranscriptWorkspace {
 export function mergeSavedWorkspace(current: TranscriptWorkspace, saved: TranscriptWorkspace, hasNewerEdits: boolean): TranscriptWorkspace {
   if (current.meeting_id !== saved.meeting_id) return current;
   if (!hasNewerEdits) return saved;
-  return { ...saved, notes: current.notes, corrections: current.corrections, project_id: current.project_id,
+  return { ...saved, notes: current.notes, notes_document: current.notes_document, corrections: current.corrections, project_id: current.project_id,
     profile: current.profile, speaker_names: current.speaker_names };
+}
+
+/** These are the fields the review editor owns; worker metadata is independent. */
+export function workspaceEdits(workspace: TranscriptWorkspace) {
+  return { notes: workspace.notes, notes_document: workspace.notes_document ?? null,
+    corrections: workspace.corrections, project_id: workspace.project_id, profile: workspace.profile,
+    speaker_names: workspace.speaker_names ?? {} };
+}
+
+export function sameWorkspaceEdits(left: TranscriptWorkspace, right: TranscriptWorkspace): boolean {
+  return stableNotesValue(workspaceEdits(left)) === stableNotesValue(workspaceEdits(right));
 }
 
 export function effectiveText(segment: Transcript, corrections: TranscriptCorrection[]): string {
@@ -163,7 +176,7 @@ export function makeTranscriptExport(
     project_id: workspace.project_id, profile: workspace.profile,
     source_job_id: workspace.source_job_id ?? null, source_meeting_id: workspace.source_meeting_id ?? null,
     workflow_role: workspace.workflow_role ?? null,
-    notes: workspace.notes, corrections: workspace.corrections, segments: rows,
+    notes: workspace.notes, notes_document: workspace.notes_document ?? null, corrections: workspace.corrections, segments: rows,
     segments_revision: workspace.segments_revision ?? null, superseded_segments: workspace.superseded_segments ?? [],
     speaker_names: workspace.speaker_names ?? {}, speaker_metadata: workspace.speaker_metadata ?? null,
   }, null, 2);

@@ -1,0 +1,35 @@
+oats for Windows x64
+
+Open oats from Start. Opening the app does not start recording.
+
+This package contains the desktop application and its native audio dependencies.
+Speech recognition still requires a separately configured local Python/model
+runtime. This installer does not download model weights or provide an automatic
+first-run speech-runtime installer. Existing configured runtimes are retained.
+
+Updates
+oats checks the public Ripplescale/Hinglish-Transcription-Platform GitHub release
+feed. It notifies before downloading. Choose Download update, then Install now.
+Installation saves open notes and is blocked during recording, dictation or local
+speech processing. Downloaded packages are verified against the public signing
+key built into this release. A Git commit alone does not create an app update.
+
+Data location
+No developer-specific data path is shipped in this package. The default is
+%LOCALAPPDATA%\STTApp. A saved data-location.json in that folder preserves an
+existing chosen location. The first manual upgrade copies the old application's
+sttapp-local-install.json there, if present and no saved choice already exists,
+before uninstalling the previous version. Existing saved choices are not replaced.
+STTAPP_DATA_DIR is an explicit environment override and takes precedence.
+
+The application identity remains com.sttapp.local, with the original xx installer
+registry identity. Existing notes, recordings, models and runtime files are not
+part of installer cleanup. This upgrade does not move or delete them.
+
+Save your notes and fully close oats before a manual upgrade. Keep a backup of
+your chosen STTApp data directory. If an older installation points into another
+application's cache, that application can still remove its cache; this installer
+preserves the location but does not migrate that data to a new directory.
+
+Tauri updater signatures verify update authenticity. They are separate from
+Windows Authenticode signing and do not by themselves eliminate SmartScreen.

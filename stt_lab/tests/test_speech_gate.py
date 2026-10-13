@@ -94,10 +94,45 @@ class SpeechGateTests(unittest.TestCase):
 
     def test_analysis_gain_keeps_faint_speech_despite_low_raw_score(self):
         samples = np.sin(np.arange(16000) * .13) * 8
-        report, _ = self.assess(samples)
-        self.assertLess(report['raw_max_probability'], .15)
-        self.assertGreater(report['boosted_max_probability'], .9)
-        self.assertFalse(report['skip_stt'])
+        for modern in (False, True):
+            with self.subTest(modern=modern):
+                report, session = self.assess(samples, SyntheticSilero(modern))
+                self.assertGreater(report['analysis_gain'], 1)
+                self.assertEqual(len(session.calls), 2 * report['frame_count'])
+                self.assertLess(report['raw_max_probability'], .15)
+                self.assertGreater(report['boosted_max_probability'], .9)
+                self.assertFalse(report['skip_stt'])
+
+    def test_unity_gain_preserves_full_diagnostics_with_one_pass(self):
+        # Include a padded tail and speech in the middle: a keep decision must
+        # not stop the pass before its full-window statistics are collected.
+        cases = (
+            ('speech', np.concatenate((np.zeros(512), np.sin(np.arange(512) * .13) * 12000,
+                                       [12000])), [.01, .95, .01], False, 1000),
+            ('peak_at_boost_target', np.ones(1025) * 8192, [.01] * 3, True, 1000),
+            ('gain_capped_at_one', np.ones(1025) * 8, [.01] * 3, True, 1),
+        )
+        for modern in (False, True):
+            for name, samples, probabilities, skip, max_gain in cases:
+                with self.subTest(modern=modern, signal=name):
+                    self.config['max_gain'] = max_gain
+                    with patch.object(speech_gate.time, 'perf_counter', side_effect=[7., 7.25]):
+                        report, session = self.assess(samples, SyntheticSilero(modern))
+                    self.assertEqual(len(session.calls), 3)
+                    expected = [float(np.float32(value)) for value in probabilities]
+                    self.assertEqual(report, {
+                        'classifier': 'silero_onnx', 'status': 'ok', 'skip_stt': skip,
+                        'audio_for_stt_is_unchanged': True, 'decision': 'skip' if skip else 'keep',
+                        'model_sha256': self.sha, 'threshold': .15, 'boost_peak': .25,
+                        'max_gain': float(max_gain), 'interface': 'state_512' if modern else 'h_c_512',
+                        'frame_samples': 512, 'context_samples': 64 if modern else 0,
+                        'duration_seconds': 1025 / 16000, 'frame_count': 3, 'analysis_gain': 1.,
+                        'raw_max_probability': max(expected), 'boosted_max_probability': max(expected),
+                        'raw_mean_probability': float(np.mean(expected)),
+                        'boosted_mean_probability': float(np.mean(expected)),
+                        'speech_evidence_seconds': 0. if skip else 512 / 16000,
+                        'elapsed_seconds': .25,
+                    })
 
     def test_official_frame_contract_pads_tail_and_carries_recurrent_state(self):
         samples = np.ones(513) * 8

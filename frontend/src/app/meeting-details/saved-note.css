@@ -3,6 +3,20 @@
 .xx-saved-note-header { flex-shrink: 0; padding: 25px 32px 17px; }
 .xx-saved-note-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
 .xx-saved-note-title { min-width: 0; font-size: 27px; line-height: 1.25; overflow-wrap: anywhere; }
+.xx-saved-note-title-editor { flex: 1; min-width: 0; }
+.xx-saved-note-title-button { display: flex; align-items: baseline; gap: 9px; width: 100%; min-width: 0; padding: 2px 3px; margin: -2px -3px; border-radius: 5px; background: transparent; text-align: left; font: inherit; color: inherit; }
+.xx-saved-note-title-button > span { min-width: 0; overflow-wrap: anywhere; }
+.xx-saved-note-title-button:hover { background: var(--xx-canvas); }
+.xx-saved-note-title-button:focus-visible { outline: 2px solid var(--xx-accent); outline-offset: 3px; }
+.xx-saved-note-title-pencil { flex-shrink: 0; opacity: .35; }
+.xx-saved-note-title-button:hover .xx-saved-note-title-pencil, .xx-saved-note-title-button:focus-visible .xx-saved-note-title-pencil { opacity: 1; }
+.xx-saved-note-title-input { display: block; width: 100%; padding: 2px 3px; margin: -3px -4px; box-sizing: content-box; border: 1px solid var(--xx-border); border-radius: 5px; color: inherit; background: var(--xx-paper); }
+.xx-saved-note-title-input:focus { outline: 2px solid var(--xx-accent); outline-offset: 1px; }
+.xx-saved-note-title-input[aria-invalid='true'] { border-color: #b91c1c; }
+.xx-saved-note-title-controls { display: flex; align-items: center; gap: 3px; margin-top: 7px; color: var(--xx-muted); font-size: 10px; }
+.xx-saved-note-title-controls > span { flex: 1; }
+.xx-saved-note-title-controls button { width: 27px; height: 27px; }
+.xx-saved-note-title-error { margin-top: 5px; color: #b91c1c; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .xx-saved-note-title-row > button { flex-shrink: 0; }
 .xx-saved-note-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin-top: 15px; color: var(--xx-muted); font-size: 11px; }
 .xx-saved-note-project { display: flex; align-items: center; min-width: 0; gap: 5px; }

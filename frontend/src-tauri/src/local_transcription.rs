@@ -7,6 +7,74 @@ use crate::{local_workspace::{data_root, valid_id}, state::AppState};
 
 static CHILDREN: Lazy<Mutex<HashMap<String, Child>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static JOB_START_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static RETENTION_JOBS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static RETENTION_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RETENTION_REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn prioritize_user_work() {
+    RETENTION_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+struct RetentionReservation;
+impl Drop for RetentionReservation {
+    fn drop(&mut self) { RETENTION_BUSY.store(false, std::sync::atomic::Ordering::SeqCst); }
+}
+
+fn schedule_completed_retention(id: String, session: String, speaker: bool) {
+    let Ok(mut scheduled) = RETENTION_JOBS.lock() else { return; };
+    if !scheduled.insert(id.clone()) { return; }
+    drop(scheduled);
+    let retry_id = id.clone();
+    let generation = RETENTION_REQUESTS.load(std::sync::atomic::Ordering::SeqCst);
+    let spawned = std::thread::Builder::new().name("recording-retention".into()).spawn(move || {
+        // Allow the automatic post-transcription speaker pass to launch first.
+        std::thread::sleep(std::time::Duration::from_secs(15));
+        // Keep archive I/O off the command/UI thread. Both gates are also used
+        // by capture/recovery and worker launch, in this same acquisition order.
+        let result = (|| -> Result<bool, String> {
+            let cancelled = || RETENTION_REQUESTS.load(std::sync::atomic::Ordering::SeqCst) != generation;
+            if cancelled() { return Ok(false); }
+            let Ok(_capture) = crate::audio::recording_commands::CAPTURE_START_LOCK.try_lock() else { return Ok(false); };
+            if crate::audio::recording_commands::capture_in_progress() || crate::dictation::is_busy() { return Ok(false); }
+            let Ok(mut children) = CHILDREN.try_lock() else { return Ok(false); };
+            for child in children.values_mut() {
+                if child.try_wait().map_err(|e|e.to_string())?.is_none() { return Ok(false); }
+            }
+            RETENTION_BUSY.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _reservation = RetentionReservation;
+            drop(children); // Status reads remain responsive during archive I/O.
+            let dir = if speaker { speaker_dir(&id)? } else { job_dir(&id)? };
+            if read(&dir.join("status.json"))?["state"] != "complete" { return Ok(false); }
+            let (source, _) = capture_session(&session)?;
+            let guards = crate::storage_retention::all_worker_guards(&data_root()?).map_err(|e|e.to_string())?;
+            crate::audio::source_archive::compact_with_cancel(&source, cancelled).map_err(|e|e.to_string())?;
+            drop(guards);
+            // A speaker pass may have occupied the earlier ASR cleanup slot.
+            // Reclaim completed ASR windows for this source together.
+            for entry in fs::read_dir(data_root()?.join("jobs")).map_err(|e|e.to_string())? {
+                let job = entry.map_err(|e|e.to_string())?.path();
+                let request = read(&job.join("request.json"))?;
+                if request["session_dir"].as_str().map(|s| path_key(s) == path_key(&session)).unwrap_or(false) {
+                    crate::storage_retention::prune_completed_windows(&job).map_err(|e|e.to_string())?;
+                }
+            }
+            Ok(true)
+        })();
+        match result {
+            Ok(true) => {},
+            Ok(false) => {
+                // The next ordinary status poll can retry after active work.
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                if let Ok(mut jobs) = RETENTION_JOBS.lock() { jobs.remove(&id); }
+            },
+            Err(error) => {
+                log::warn!("Retained source/cache files for {id}: {error}");
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                if let Ok(mut jobs) = RETENTION_JOBS.lock() { jobs.remove(&id); }
+            },
+        }
+    });
+    if spawned.is_err() { if let Ok(mut jobs) = RETENTION_JOBS.lock() { jobs.remove(&retry_id); } }
+}
 
 pub fn profile_parts(profile: &str) -> Result<(&'static str, u32), String> {
     match profile {
@@ -193,10 +261,22 @@ fn ensure_job_runtime_snapshot(dir: &Path, current_config: &Path) -> Result<Path
 }
 
 fn launch_process(id: &str, config_file: &Path, dir: &Path) -> Result<(),String> {
+    let _update_start = crate::updates::start_lease()?;
     let mut children = CHILDREN.lock().map_err(|e| e.to_string())?;
+    if RETENTION_BUSY.load(std::sync::atomic::Ordering::SeqCst) { return Err("Finishing recording storage cleanup. Try again in a moment.".into()); }
+    if crate::dictation::is_busy() { return Err("Finish or cancel dictation before starting local transcription.".into()); }
     let mut active = false;
     for child in children.values_mut() { if child.try_wait().map_err(|e| e.to_string())?.is_none() { active = true; } }
     if active { return Err("One local transcription job is already running. Finish or stop it before starting another version.".into()); }
+    crate::dictation::release_idle_model();
+    // Jobs keep their immutable original Python worker. Restore the exact
+    // committed WAV bytes so even workers predating archive support can resume.
+    let request = read(&dir.join("request.json"))?;
+    if dir.parent().and_then(Path::file_name).and_then(|s|s.to_str()) == Some("jobs") {
+        let session = request["session_dir"].as_str().ok_or("Missing source session")?;
+        let (session, _) = capture_session(session)?;
+        crate::audio::source_archive::restore(&session).map_err(|e|e.to_string())?;
+    }
     let config = read(config_file)?;
     let python = config["python_executable"].as_str().ok_or("Missing local Python")?;
     let script = config["worker_script"].as_str().ok_or("Missing local worker")?;
@@ -211,6 +291,44 @@ fn launch_process(id: &str, config_file: &Path, dir: &Path) -> Result<(),String>
     let child = command.spawn().map_err(|e| format!("Local worker could not start: {e}"))?;
     children.insert(id.into(), child);
     Ok(())
+}
+
+/// Claim dictation while holding the same lock used to launch every ASR/speaker
+/// child, so a meeting job cannot race a dictation model into memory.
+pub(crate) fn reserve_for_dictation() -> Result<(), String> {
+    let mut children = CHILDREN.lock().map_err(|e| e.to_string())?;
+    for child in children.values_mut() {
+        if child.try_wait().map_err(|e| e.to_string())?.is_none() {
+            return Err("Wait for local transcription to finish before starting dictation.".into());
+        }
+    }
+    crate::dictation::try_claim()
+}
+
+/// Called under the updater handoff reservation, which excludes all new job
+/// starts. Do not terminate or wait for a running worker to authorize an update.
+pub(crate) fn update_work_active() -> Result<bool, String> {
+    if RETENTION_BUSY.load(std::sync::atomic::Ordering::SeqCst) { return Ok(true); }
+    let mut children = CHILDREN.try_lock().map_err(|_| "Local speech work is changing. Try installing again when it finishes.".to_owned())?;
+    for child in children.values_mut() {
+        if child.try_wait().map_err(|_| "Could not verify that local speech work has stopped.".to_owned())?.is_none() { return Ok(true); }
+    }
+    Ok(false)
+}
+
+/// The caller holds CAPTURE_START_LOCK. Keep background model preparation under
+/// the worker launch lock so a meeting waits for the short process spawn, then
+/// evicts the idle model, instead of seeing a false user-dictation reservation.
+pub(crate) fn prepare_idle_dictation(prepare: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    let _update_start = crate::updates::start_lease()?;
+    let mut children = CHILDREN.try_lock().map_err(|_| "Local speech work is busy.".to_owned())?;
+    if crate::dictation::is_busy() { return Err("Dictation is already active.".into()); }
+    for child in children.values_mut() {
+        if child.try_wait().map_err(|e| e.to_string())?.is_none() {
+            return Err("Local transcription is already active.".into());
+        }
+    }
+    prepare()
 }
 
 fn speaker_dir(id: &str) -> Result<PathBuf,String> { valid_id(id)?; Ok(data_root()?.join("speaker-jobs").join(id)) }
@@ -231,6 +349,11 @@ pub fn get_speaker_setup_status() -> Result<Value,String> {
 
 #[tauri::command]
 pub async fn start_speaker_identification(state: tauri::State<'_,AppState>, transcription_job_id: String, meeting_id: String) -> Result<Value,String> {
+    let _update_start = crate::updates::start_lease()?;
+    prioritize_user_work();
+    while RETENTION_BUSY.load(std::sync::atomic::Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     if get_speaker_setup_status()?["available"]!=true { return Err("The local speaker model needs setup".into()); }
     valid_id(&meeting_id)?;
     let transcript=get_local_transcription_status(transcription_job_id.clone())?;
@@ -276,12 +399,20 @@ pub fn get_speaker_job_status(job_id: String) -> Result<Value,String> {
     if status["state"]=="complete" {
         let meeting=request["meeting_id"].as_str().ok_or("Speaker meeting ID missing")?;
         crate::local_workspace::set_speaker_metadata(meeting,&job_id,&status["result"])?;
+        if let Some(session) = request["session_dir"].as_str() {
+            schedule_completed_retention(job_id, session.to_owned(), true);
+        }
     }
     Ok(status)
 }
 
 #[tauri::command]
-pub fn retry_speaker_identification(job_id: String) -> Result<Value,String> {
+pub async fn retry_speaker_identification(job_id: String) -> Result<Value,String> {
+    let _update_start = crate::updates::start_lease()?;
+    prioritize_user_work();
+    while RETENTION_BUSY.load(std::sync::atomic::Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     let status=get_speaker_job_status(job_id.clone())?;
     if !["failed","stopped"].contains(&status["state"].as_str().unwrap_or("")) { return Err("Only interrupted speaker jobs can retry".into()); }
     launch_process(&job_id,&data_root()?.join("speaker-runtime.json"),&speaker_dir(&job_id)?)?;
@@ -289,7 +420,20 @@ pub fn retry_speaker_identification(job_id: String) -> Result<Value,String> {
 }
 
 #[tauri::command]
-pub fn start_local_transcription(session_dir: String, profile: String, language_mode: String, project_id: Option<String>, workflow_role: Option<String>, final_profile: Option<String>) -> Result<Value, String> {
+pub async fn start_local_transcription(session_dir: String, profile: String, language_mode: String, project_id: Option<String>, workflow_role: Option<String>, final_profile: Option<String>) -> Result<Value, String> {
+    let _update_start = crate::updates::start_lease()?;
+    prioritize_user_work();
+    while RETENTION_BUSY.load(std::sync::atomic::Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    tokio::task::spawn_blocking(move || {
+        let _update_start = _update_start;
+        start_local_transcription_inner(session_dir, profile, language_mode, project_id, workflow_role, final_profile)
+    })
+        .await.map_err(|e|e.to_string())?
+}
+
+fn start_local_transcription_inner(session_dir: String, profile: String, language_mode: String, project_id: Option<String>, workflow_role: Option<String>, final_profile: Option<String>) -> Result<Value, String> {
     let _start_guard = JOB_START_LOCK.lock().map_err(|e| e.to_string())?;
     profile_parts(&profile)?;
     validate_workflow_role(workflow_role.as_deref(), &profile)?;
@@ -407,6 +551,12 @@ pub fn get_local_transcription_status(job_id: String) -> Result<Value, String> {
     }
     project_worker_lifecycle(&mut result, exited);
     project_request_metadata(&mut result, &request);
+    drop(children);
+    if exited && result["state"] == "complete" {
+        if let Some(session) = request["session_dir"].as_str() {
+            schedule_completed_retention(job_id, session.to_owned(), false);
+        }
+    }
     Ok(result)
 }
 
@@ -433,7 +583,20 @@ pub fn stop_local_transcription(job_id: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn resume_local_transcription(job_id: String) -> Result<Value, String> {
+pub async fn resume_local_transcription(job_id: String) -> Result<Value, String> {
+    let _update_start = crate::updates::start_lease()?;
+    prioritize_user_work();
+    while RETENTION_BUSY.load(std::sync::atomic::Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    tokio::task::spawn_blocking(move || {
+        let _update_start = _update_start;
+        resume_local_transcription_inner(job_id)
+    })
+        .await.map_err(|e|e.to_string())?
+}
+
+fn resume_local_transcription_inner(job_id: String) -> Result<Value, String> {
     let status = get_local_transcription_status(job_id.clone())?;
     if !["failed","stopped"].contains(&status["state"].as_str().unwrap_or("")) { return Err("Only failed or stopped jobs can resume".into()); }
     let stop = job_dir(&job_id)?.join("stop.request");

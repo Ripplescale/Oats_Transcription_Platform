@@ -41,6 +41,7 @@ pub mod audio;
 pub mod config;
 pub mod local_workspace;
 pub mod local_transcription;
+mod storage_retention;
 pub mod console_utils;
 pub mod database;
 pub mod notifications;
@@ -55,6 +56,8 @@ pub mod state;
 pub mod summary;
 pub mod tray;
 mod meeting_detection;
+mod dictation;
+mod updates;
 pub mod utils;
 pub mod whisper_engine;
 #[cfg(target_os = "windows")]
@@ -472,6 +475,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(updates::plugin())
         .manage(whisper_engine::parallel_commands::ParallelProcessorState::new())
         .manage(Arc::new(RwLock::new(
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
@@ -497,6 +501,8 @@ pub fn run() {
 
             // Initialize system tray
             meeting_detection::start(_app.handle());
+            dictation::start(_app.handle());
+            updates::init(_app.handle());
             if let Err(e) = tray::create_tray(_app.handle()) {
                 log::error!("Failed to create system tray: {}", e);
             }
@@ -579,6 +585,17 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            updates::updates_status,
+            updates::updates_check,
+            updates::updates_download,
+            updates::updates_install,
+            dictation::dictation_status,
+            dictation::dictation_toggle,
+            dictation::dictation_cancel,
+            dictation::dictation_dismiss,
+            dictation::dictation_popup_layout,
+            dictation::dictation_popup_drag,
+            dictation::dictation_copy,
             meeting_detection::meeting_detection_status,
             meeting_detection::set_meeting_detection,
             meeting_detection::meeting_detection_ready,
@@ -591,6 +608,9 @@ pub fn run() {
             local_workspace::list_project_library,
             local_workspace::create_project,
             local_workspace::rename_project,
+            local_workspace::archive_project,
+            local_workspace::set_meeting_tags,
+            local_workspace::move_meeting_to_project,
             local_workspace::local_get_meeting_audio,
             local_workspace::list_project_vaults,
             local_workspace::load_project_vault,
@@ -829,6 +849,7 @@ pub fn run() {
                     tray::focus_main_window(_app_handle);
                 }
                 tauri::RunEvent::Exit => {
+                    dictation::shutdown(_app_handle);
                     log::info!("Application exiting, cleaning up resources...");
                     tauri::async_runtime::block_on(async {
                         // Clean up database connection and checkpoint WAL

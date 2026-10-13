@@ -1,78 +1,46 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { Transcript } from '@/types';
-import { emptyWorkspace, mergeSavedWorkspace, setCorrection, type TranscriptWorkspace } from '@/lib/transcript-workspace';
+import { emptyWorkspace, setCorrection } from '@/lib/transcript-workspace';
+import type { NotesDocument } from '@/lib/rich-notes';
+import { parseWorkspaceJournal, WorkspaceAutosaver, type WorkspaceState } from '@/lib/workspace-autosaver';
+import { registerUpdateSaveGuard } from '@/lib/update-safety';
 
 export function useTranscriptWorkspace(meetingId: string) {
-  const [workspace, setWorkspace] = useState(() => emptyWorkspace(meetingId));
-  const [loaded, setLoaded] = useState(false);
-  const [dirty, setDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const meetingRef = useRef(meetingId);
-  meetingRef.current = meetingId;
-  const editGeneration = useRef(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoaded(false);
-    setDirty(false);
-    setSaving(false);
-    setError(null);
-    invoke<TranscriptWorkspace>('load_transcript_workspace', { meetingId }).then(result => {
-      if (!cancelled) { setWorkspace(result); setLoaded(true); }
-    }).catch(reason => { if (!cancelled) setError(String(reason)); });
-    return () => { cancelled = true; };
+  const [state, setState] = useState<WorkspaceState>(() => ({ workspace: emptyWorkspace(meetingId), loaded: false, dirty: false, saving: false, error: null }));
+  const activeStore = useRef<WorkspaceAutosaver | null>(null);
+  const store = useMemo(() => {
+    const current = new WorkspaceAutosaver(meetingId, invoke, next => { if (activeStore.current === current) setState(next); }, draft => {
+      try { const key = `xx.workspace-draft.${meetingId}`; if (draft) localStorage.setItem(key, JSON.stringify(draft)); else localStorage.removeItem(key); } catch { /* Native autosave remains available when browser storage is full. */ }
+    });
+    return current;
   }, [meetingId]);
-
   useEffect(() => {
-    let cancelled = false;
-    const update = (event: Event) => {
-      if ((event as CustomEvent<{ meetingId: string }>).detail.meetingId !== meetingId || dirty || saving) return;
-      const generation = editGeneration.current;
-      void invoke<TranscriptWorkspace>('load_transcript_workspace', { meetingId }).then(result => { if (!cancelled && generation === editGeneration.current) setWorkspace(result); }).catch(reason => { if (!cancelled) setError(String(reason)); });
-    };
+    activeStore.current = store; setState({ ...store.state });
+    let draft;
+    try { const value = localStorage.getItem(`xx.workspace-draft.${meetingId}`); if (value) draft = parseWorkspaceJournal(JSON.parse(value)); } catch { /* Invalid recovery data must not replace saved notes. */ }
+    void store.load(draft);
+    const update = (event: Event) => { if ((event as CustomEvent<{ meetingId: string }>).detail?.meetingId === meetingId) void store.refresh(); };
     window.addEventListener('local-transcript-updated', update);
-    return () => { cancelled = true; window.removeEventListener('local-transcript-updated', update); };
-  }, [meetingId, dirty, saving]);
-
+    return () => { if (activeStore.current === store) activeStore.current = null; window.removeEventListener('local-transcript-updated', update); };
+  }, [store, meetingId]);
+  useEffect(() => registerUpdateSaveGuard(async () => {
+    await store.flush();
+    if (!store.state.loaded || store.state.dirty || store.state.saving || store.state.error) {
+      throw new Error(store.state.error || 'Save your notes and transcript edits before installing the update.');
+    }
+  }), [store]);
   useEffect(() => {
-    if (!dirty) return;
-    const preventClose = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    const preventClose = (event: BeforeUnloadEvent) => { if (store.state.dirty || store.state.saving) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('beforeunload', preventClose);
     return () => window.removeEventListener('beforeunload', preventClose);
-  }, [dirty]);
-
-  const updateNotes = (notes: string) => { editGeneration.current += 1; setWorkspace(value => ({ ...value, notes })); setDirty(true); };
-  const updateProject = (project_id: string | null) => { editGeneration.current += 1; setWorkspace(value => ({ ...value, project_id })); setDirty(true); };
-  const updateSpeakerName = (speakerId: string, name: string) => { editGeneration.current += 1; setWorkspace(value => ({ ...value, speaker_names: { ...value.speaker_names, [speakerId]: name } })); setDirty(true); };
-  const updateCorrection = (segment: Transcript, text: string) => {
-    editGeneration.current += 1;
-    setWorkspace(value => ({ ...value, corrections: setCorrection(value.corrections, segment, text, new Date().toISOString()) }));
-    setDirty(true);
-  };
-  const save = useCallback(async () => {
-    if (!loaded || saving) return;
-    setSaving(true);
-    setError(null);
-    const generationAtSave = editGeneration.current;
-    const savedMeetingId = meetingId;
-    try {
-      const saved = await invoke<TranscriptWorkspace>('save_transcript_workspace', {
-        meetingId, expectedRevision: workspace.revision, notes: workspace.notes,
-        corrections: workspace.corrections, projectId: workspace.project_id, profile: workspace.profile,
-        speakerNames: workspace.speaker_names ?? {},
-      });
-      if (meetingRef.current !== savedMeetingId) return;
-      const hasNewerEdits = generationAtSave !== editGeneration.current;
-      setWorkspace(current => mergeSavedWorkspace(current, saved, hasNewerEdits));
-      setDirty(hasNewerEdits);
-    } catch (reason) {
-      if (meetingRef.current === savedMeetingId) setError(`Could not save. Your edits remain here. ${String(reason)}`);
-      throw reason;
-    } finally { if (meetingRef.current === savedMeetingId) setSaving(false); }
-  }, [loaded, saving, meetingId, workspace]);
-  return { workspace, loaded, dirty, saving, error, updateNotes, updateProject, updateCorrection, updateSpeakerName, save };
+  }, [store]);
+  const updateNotes = (notes: string, notes_document?: NotesDocument) => store.update({ notes, ...(notes_document ? { notes_document } : {}) });
+  const updateProject = (project_id: string | null) => store.update({ project_id });
+  const updateSpeakerName = (speakerId: string, name: string) => store.update({ speaker_names: { ...store.state.workspace.speaker_names, [speakerId]: name } });
+  const updateCorrection = (segment: Transcript, text: string) => store.update({ corrections: setCorrection(store.state.workspace.corrections, segment, text, new Date().toISOString()) });
+  const save = useCallback(() => store.retry(), [store]);
+  return { ...state, updateNotes, updateProject, updateCorrection, updateSpeakerName, save, discardDraft: () => store.discardDraft() };
 }

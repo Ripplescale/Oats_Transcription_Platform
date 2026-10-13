@@ -118,14 +118,14 @@ async function installCleanLiveFixture(page) {
       if (command === 'load_transcript_workspace' && args.meetingId === 'qa-live') return clone(live);
       if (command === 'save_transcript_workspace' && args.meetingId === 'qa-live') {
         if (args.expectedRevision !== live.revision) throw Error('Revision conflict');
-        live = { ...live, notes: args.notes, corrections: clone(args.corrections), project_id: args.projectId, profile: args.profile, speaker_names: clone(args.speakerNames ?? {}), revision: live.revision + 1 };
+        live = { ...live, notes: args.notes, notes_document: args.clearNotesDocument ? null : args.notesDocument ?? live.notes_document, corrections: clone(args.corrections), project_id: args.projectId, profile: args.profile, speaker_names: clone(args.speakerNames ?? {}), revision: live.revision + 1 };
         return clone(live);
       }
       if (command === 'save_meeting_note') {
         if (args.meetingId !== 'qa-live') throw Error('Unexpected note target');
         if (args.expectedRevision !== live.revision) throw Error('Revision conflict');
         if (saveGate) await saveGate.promise;
-        live = { ...live, notes: args.notes, project_id: args.projectId, revision: live.revision + 1 };
+        live = { ...live, notes: args.notes, notes_document: args.clearNotesDocument ? null : args.notesDocument ?? live.notes_document, project_id: args.projectId, revision: live.revision + 1 };
         record('qa:note-save-completed', { revision: live.revision, notes: live.notes }); return clone(live);
       }
       return original(command, args);
@@ -171,7 +171,7 @@ async function targetedChecks(page, report, screen, checkSize) {
   assert.equal((await page.evaluate(() => window.qaCleanState())).recording, true);
   assert.equal(await page.getByRole('button', { name: 'Stop recording', exact: true }).isEnabled(), true);
   assert.equal(await editor.isEnabled(), true);
-  assert.match(await editor.inputValue(), /workshop thought/);
+  assert.match(await editor.innerText(), /workshop thought/);
   await checkSize('live-worker-failure', 920, 740);
   await checkSize('live-worker-failure', 720, 560);
   assert.equal(await page.evaluate(() => window.qaCleanMediaCalls), 0);
@@ -232,25 +232,20 @@ async function main() {
     await page.getByRole('heading', { name: 'Your notes', exact: true }).waitFor();
     await page.waitForFunction(() => window.qaCalls.some(call => call.command === 'list_project_library'));
     assert.match(await page.title(), /^oats/);
-    const sidebar = page.getByRole('complementary', { name: 'Workspace navigation' });
-    await sidebar.getByRole('img', { name: 'oats', exact: true }).waitFor();
+    assert.equal(await page.getByRole('complementary', { name: 'Workspace navigation' }).count(), 0);
     await page.waitForFunction(() => [...document.querySelectorAll('.xx-brand-mascot, .xx-library-illustration')].every(image => image.complete && image.naturalWidth > 0));
-    await sidebar.getByRole('button', { name: 'Expand sidebar', exact: true }).click();
     await page.evaluate(() => document.fonts.ready);
     await page.waitForTimeout(250);
-    assert.equal(await sidebar.locator('.xx-wordmark').innerText(), 'oats');
-    const wordmark = await sidebar.locator('.xx-wordmark').boundingBox();
-    const collapse = await sidebar.getByRole('button', { name: 'Collapse sidebar', exact: true }).boundingBox();
-    assert.ok(wordmark && collapse && wordmark.x + wordmark.width <= collapse.x + 1, 'oats wordmark fits beside the sidebar control');
-    await checkSize('library-expanded', 1366, 768);
-    await sidebar.getByRole('button', { name: 'About oats', exact: true }).last().click();
+    assert.equal(await page.locator('.xx-library .xx-wordmark').innerText(), 'oats');
+    await checkSize('library-full-width', 1366, 768);
+    await page.getByRole('button', { name: 'About oats', exact: true }).click();
     const about = page.getByRole('dialog', { name: 'About oats', exact: true });
     await about.waitFor();
     await about.getByText('oats', { exact: true }).waitFor();
     await page.keyboard.press('Escape');
-    await sidebar.getByRole('button', { name: 'Collapse sidebar', exact: true }).click();
+    await about.waitFor({ state: 'hidden' });
     await page.setViewportSize({ width: 920, height: 740 });
-    report.checks.push('oats title, loaded buddy mascot, expanded wordmark and About dialog remain readable and accessible');
+    report.checks.push('Full-width Home has no sidebar and keeps loaded branding and the About dialog accessible');
     if (process.argv.includes('--targeted-errors')) {
       await targetedChecks(page, report, screen, checkSize);
     } else {
@@ -265,14 +260,14 @@ async function main() {
     await page.getByRole('textbox', { name: 'Search notes', exact: true }).fill('sketchbooks');
     assert.equal(await page.locator('.xx-note-row').count(), 1);
     await page.getByRole('button', { name: 'Clear note search', exact: true }).click();
-    await page.getByRole('button', { name: 'New project', exact: true }).click();
-    await page.getByRole('textbox', { name: 'Project name', exact: true }).fill('Project Juniper');
-    await page.getByRole('button', { name: 'Save project', exact: true }).click();
+    await page.getByRole('button', { name: 'New folder', exact: true }).click();
+    await page.getByRole('textbox', { name: 'Folder name', exact: true }).fill('Project Juniper');
+    await page.getByRole('button', { name: 'Save folder', exact: true }).click();
     await page.getByRole('heading', { name: 'Project Juniper', exact: true }).waitFor();
     assert.equal((await page.evaluate(() => window.qaCleanState().projects)).length, 3);
-    await page.getByRole('navigation', { name: 'Projects', exact: true }).getByRole('button', { name: 'Project Willow', exact: true }).click();
-    await page.getByRole('button', { name: 'Project memory', exact: false }).click();
-    const memory = page.getByRole('region', { name: 'Project memory', exact: true });
+    await page.getByRole('navigation', { name: 'Folders', exact: true }).getByRole('button', { name: 'Project Willow', exact: true }).click();
+    await page.getByRole('button', { name: 'Folder memory', exact: false }).click();
+    const memory = page.getByRole('region', { name: 'Folder memory', exact: true });
     await memory.getByText('Willow Studio', { exact: true }).waitFor();
     assert.match(await memory.innerText(), /Prepare sketchbooks/);
     assert.match(await memory.innerText(), /Fictional workshop brief/);
@@ -289,7 +284,7 @@ async function main() {
     assert.equal((await page.evaluate(() => window.qaCalls.filter(call => call.command === 'start_local_transcription'))).length, 1);
     assert.equal(await page.locator('#live-transcript-drawer').isVisible(), false);
     assert.equal(await page.getByRole('button', { name: 'Show transcript', exact: true }).getAttribute('aria-expanded'), 'false');
-    assert.equal(await editor.inputValue(), '');
+    assert.equal((await editor.innerText()).trim(), '');
     report.checks.push('Rapid New note clicks start exactly one synthetic capture and one Trelis10 job, attach a durable meeting and open an empty notes canvas with transcript collapsed');
     await editor.fill('Workshop notes\n\nPrepare 24 sketchbooks. Maya will confirm the room.');
     await page.waitForFunction(() => window.qaCleanState().live.notes.includes('24 sketchbooks'));
@@ -339,6 +334,7 @@ async function main() {
   } finally {
     fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
     if (browser) await browser.close();
+    server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
   }
   console.log(JSON.stringify(report));

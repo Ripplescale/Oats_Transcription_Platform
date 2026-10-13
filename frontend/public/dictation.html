@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dictation · oats</title><link rel="icon" href="oats-buddy.png"><link rel="stylesheet" href="dictation.css"><script src="dictation.js" defer></script></head>
+<body><main id="dictation" aria-label="Dictation" data-phase="starting" data-expanded="false">
+  <div class="pill">
+    <button id="grip" type="button" title="Drag to move dictation" aria-label="Move dictation popup"><svg width="12" height="20" viewBox="0 0 12 20" aria-hidden="true"><g fill="currentColor"><circle cx="4" cy="5" r="1.2"/><circle cx="8" cy="5" r="1.2"/><circle cx="4" cy="10" r="1.2"/><circle cx="8" cy="10" r="1.2"/><circle cx="4" cy="15" r="1.2"/><circle cx="8" cy="15" r="1.2"/></g></svg></button>
+    <div class="activity"><div class="status-line"><span id="processing" aria-hidden="true"></span><h1 id="title" aria-live="polite" aria-atomic="true" aria-describedby="hint">Getting ready…</h1></div><div id="level" class="level" role="meter" aria-label="Microphone input level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+    <div class="actions"><button id="stop" type="button" title="Stop dictation" aria-label="Stop dictation" disabled hidden><span class="stop-mark" aria-hidden="true"></span><span>Stop</span></button><button id="cancel" type="button" title="Cancel dictation" aria-label="Cancel dictation" disabled>×</button><button id="dismiss" type="button" title="Dismiss dictation" aria-label="Dismiss dictation" hidden>×</button></div>
+    <p id="hint" class="visually-hidden">Connecting to oats…</p><time id="elapsed" class="visually-hidden" aria-label="Recording duration">00:00</time>
+  </div>
+  <section id="result-panel" hidden aria-label="Dictation result"><p id="message" tabindex="0"></p><div id="result" tabindex="0" aria-label="Dictation text"></div><div class="result-actions"><button id="copy" type="button" title="Copy dictation text to your clipboard">Copy text</button><span id="copy-status" role="status"></span></div></section>
+  <p id="error" class="visually-hidden" role="alert" hidden></p>
+</main></body></html>

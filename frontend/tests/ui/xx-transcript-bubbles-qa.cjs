@@ -37,6 +37,7 @@ async function main() {
       const extra = [
         { id: 'legacy-source', text: 'An older combined recording keeps a neutral source label.', timestamp: '15:05', audio_start_time: 100, audio_end_time: 120, source_track: 'mixed' },
         { id: 'missing-source', text: 'Source information was not saved.\n\nReference: ' + 'LongReferenceToken'.repeat(40), timestamp: '15:06', audio_start_time: 120, audio_end_time: 140 },
+        { id: 'short-source', text: 'Yes.', timestamp: '15:07', audio_start_time: 140, audio_end_time: 142, source_track: 'system' },
       ];
       window.__TAURI_INTERNALS__.invoke = async (command, args = {}) => {
         if (command === 'api_get_meeting_transcripts') {
@@ -53,9 +54,25 @@ async function main() {
     await page.getByRole('button', { name: 'Show transcript', exact: true }).click();
     const transcript = page.getByRole('region', { name: 'Transcript', exact: true });
     await transcript.locator('article[data-segment-id="missing-source"]').waitFor({ state: 'attached' });
-    assert.deepEqual(await transcript.locator('article').evaluateAll(rows => rows.map(row => row.dataset.segmentId)), ['first', 'second', 'third', 'fourth', 'fifth', 'legacy-source', 'missing-source']);
+    assert.deepEqual(await transcript.locator('article').evaluateAll(rows => rows.map(row => row.dataset.segmentId)), ['first', 'second', 'third', 'fourth', 'fifth', 'legacy-source', 'missing-source', 'short-source']);
+    const setMode = async mode => {
+      await page.getByRole('button', { name: 'Settings', exact: true }).click();
+      await page.getByRole('group', { name: 'Display mode', exact: true }).getByRole('button', { name: mode, exact: true }).click();
+      await page.keyboard.press('Escape');
+    };
+    assert.equal(await transcript.locator('.xx-transcript-source-label').count(), 0);
+    assert.equal(await transcript.getByText('Processing checks', { exact: true }).count(), 0);
+    assert.equal(await transcript.getByText('Review suggested', { exact: true }).count(), 0);
+    const short = transcript.locator('article[data-segment-id="short-source"]');
+    const long = transcript.locator('article[data-segment-id="first"]');
+    assert.ok((await short.boundingBox()).width < (await long.boundingBox()).width * 0.6, 'A short User bubble fits its text instead of filling the column');
+    await page.screenshot({ path: path.join(output, 'user-mode.png') }); report.screenshots.push('user-mode.png');
+    await short.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(output, 'user-short-bubble.png') }); report.screenshots.push('user-short-bubble.png');
+    await setMode('Dev');
     await transcript.getByText('Left: computer audio · Right: microphone. Labels identify audio sources, not people.', { exact: true }).waitFor();
-    report.checks.push('Audio-source bubbles retain chronological segment order and explicitly distinguish sources from people');
+    assert.ok((await short.boundingBox()).width < (await long.boundingBox()).width, 'Dev metadata uses natural width without a forced column-wide bubble');
+    report.checks.push('User defaults to text and timestamps; Dev restores diagnostics and source labels without changing chronology');
 
     for (const [width, height] of [[600, 560], [600, 820], [680, 820], [920, 740]]) {
       await page.setViewportSize({ width, height });
@@ -72,12 +89,13 @@ async function main() {
       assert.ok(microphone.x > system.x + 12, 'Microphone aligns to the right of computer audio');
       assert.notEqual(system.background, microphone.background, 'Both source colors are distinguishable');
       for (const row of layout.rows) {
-        assert.ok(row.x >= 0 && row.right <= width + 1 && row.width > 300, `Bubble fits readable width for ${row.id}`);
+        assert.ok(row.x >= 0 && row.right <= width + 1 && row.width > 40, `Bubble fits its content within the window for ${row.id}`);
         assert.equal(row.textOverflows, false, `Long tokens wrap within ${row.id}`);
       }
-      for (const row of layout.rows.slice(-2)) {
+      for (const row of layout.rows.filter(row => ['legacy-source', 'missing-source'].includes(row.id))) {
         assert.equal(row.channel, 'unknown'); assert.notEqual(row.background, system.background); assert.notEqual(row.background, microphone.background);
-        assert.ok(row.x > system.x && row.x < microphone.x, 'Legacy and missing sources use neutral alignment');
+        const container = await transcript.locator('.xx-transcript-thread').boundingBox();
+        assert.ok(Math.abs((row.x + row.right) / 2 - (container.x + container.width / 2)) < 15, 'Legacy and missing sources remain centered');
       }
       const missing = transcript.locator('article[data-segment-id="missing-source"]');
       await missing.getByText('Source unavailable', { exact: true }).waitFor({ state: 'attached' });
@@ -95,6 +113,12 @@ async function main() {
     await microphone.getByRole('button', { name: 'Edit', exact: true }).click();
     const corrected = 'Checked microphone line. हिंदी and English remain together.';
     await microphone.getByRole('textbox', { name: 'Correct transcript text', exact: true }).fill(corrected);
+    await page.evaluate(() => { window.qaDraftElement = document.querySelector('textarea[aria-label="Correct transcript text"]'); window.qaAudioElement = document.querySelector('audio'); });
+    await setMode('User');
+    assert.equal(await microphone.getByRole('textbox', { name: 'Correct transcript text', exact: true }).inputValue(), corrected);
+    assert.equal(await page.evaluate(() => window.qaDraftElement === document.querySelector('textarea[aria-label="Correct transcript text"]') && window.qaAudioElement === document.querySelector('audio')), true);
+    assert.equal(await microphone.getByText('Microphone', { exact: true }).count(), 0);
+    await setMode('Dev');
     await microphone.getByRole('button', { name: 'Apply correction', exact: true }).click();
     await page.waitForFunction(() => window.qaWorkspace().corrections.some(item => item.segment_id === 'second'));
     await microphone.getByText(corrected, { exact: true }).waitFor();
@@ -119,6 +143,14 @@ async function main() {
     }
     assert.ok(evidence.copied.includes('LongReferenceToken'.repeat(40)), 'Copy keeps the full unbroken long token');
     assert.ok(!evidence.calls.some(call => /start_.*(recording|transcription|identification)|open_claude|plugin:dialog/.test(call.command)));
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Show transcript', exact: true }).click();
+    await transcript.getByText('Left: computer audio · Right: microphone. Labels identify audio sources, not people.', { exact: true }).waitFor();
+    await setMode('User'); await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Show transcript', exact: true }).click();
+    await transcript.locator('article[data-segment-id="first"]').waitFor({ state: 'attached' });
+    assert.equal(await transcript.locator('.xx-transcript-source-label').count(), 0);
+    report.checks.push('Mode changes keep the exact correction editor and audio element mounted; both mode choices persist across reloads');
     assert.deepEqual(report.page_errors, []);
     report.checks.push('Copy uses every complete segment in unchanged order, including correction, unknown sources and the untruncated long token');
     report.passed = true;

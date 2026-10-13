@@ -2,7 +2,9 @@
 
 import './globals.css'
 import './xx.css'
-import Sidebar from '@/components/Sidebar'
+import './workspace-shell.css'
+import './user-mode.css'
+import { DisplayModeProvider } from '@/contexts/DisplayModeContext'
 import { SidebarProvider } from '@/components/Sidebar/SidebarProvider'
 import MainContent from '@/components/MainContent'
 import AnalyticsProvider from '@/components/AnalyticsProvider'
@@ -235,7 +237,7 @@ export default function RootLayout({
                 <OllamaDownloadProvider>
                   <OnboardingProvider>
                     <UpdateCheckProvider>
-                      <SidebarProvider>
+                      <DisplayModeProvider><SidebarProvider>
                         <MeetingDetectionBridge ready={onboardingCompleted && !showOnboarding} />
                         <TooltipProvider>
                           <LocalWorkflowProvider><RecordingPostProcessingProvider>
@@ -247,10 +249,7 @@ export default function RootLayout({
                               {showOnboarding ? (
                                 <OnboardingFlow onComplete={handleOnboardingComplete} />
                               ) : (
-                                <div className="flex">
-                                  <Sidebar />
-                                  <MainContent>{children}</MainContent>
-                                </div>
+                                <MainContent>{children}</MainContent>
                               )}
                               {/* Import audio overlay and dialog */}
                               <ImportDropOverlay visible={showDropOverlay} />
@@ -262,7 +261,7 @@ export default function RootLayout({
                             </ImportDialogProvider>
                           </RecordingPostProcessingProvider></LocalWorkflowProvider>
                         </TooltipProvider>
-                      </SidebarProvider>
+                      </SidebarProvider></DisplayModeProvider>
                     </UpdateCheckProvider>
                   </OnboardingProvider>
 

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useRouter } from 'next/navigation';
 import { NoteAutosaver, type NoteState } from '@/lib/note-autosaver';
+import { registerUpdateSaveGuard } from '@/lib/update-safety';
 
 export function useLiveNote(meetingId: string, initialProject?: string | null) {
   const router = useRouter();
@@ -25,11 +26,17 @@ export function useLiveNote(meetingId: string, initialProject?: string | null) {
     void store.load(initialProject, draft);
     return () => { if (activeStore.current === store) activeStore.current = null; };
   }, [store, meetingId, initialProject]);
+  useEffect(() => registerUpdateSaveGuard(async () => {
+    await store.flush();
+    if (!store.state.loaded || store.state.dirty || store.state.saving || store.state.error) {
+      throw new Error(store.state.error || 'Save your meeting notes before installing the update.');
+    }
+  }), [store]);
   useEffect(() => {
     if (!state.dirty || state.error || state.saving) return;
     const timer = setTimeout(() => { void store.flush().then(() => window.dispatchEvent(new Event('xx-projects-updated'))).catch(() => {}); }, 650);
     return () => clearTimeout(timer);
-  }, [store, state.notes, state.projectId, state.dirty, state.error, state.saving]);
+  }, [store, state.notes, state.notesDocument, state.projectId, state.dirty, state.error, state.saving]);
   useEffect(() => {
     const navigate = (event: Event) => {
       if (!store.state.dirty && !store.state.saving) return;

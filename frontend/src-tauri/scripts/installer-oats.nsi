@@ -1,8 +1,9 @@
-; Derived from Tauri CLI 2.11.1 (MIT; see TAURI-LICENSE-MIT).
-; Upstream: https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.1/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi
-; Original SHA256: ee84148e405adc4d736a46456dd8345a644751bd1f28a335dd7fd833a32d7c3e
-; Local changes: keep xx registry identity during the oats display-name rename.
-; When upgrading the CLI, rebase these three registry definitions onto its template.
+; Derived from Tauri CLI 2.12.0 (MIT; see TAURI-LICENSE-MIT).
+; Upstream: https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.0/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi
+; Original SHA256: dabed59013b1d78b879a1a85bc7f2eed2993b33a9a90cdabe5946de3d3950597
+; Local changes: keep xx registry identity during the oats display-name rename;
+; preserve the legacy data-location pointer before any old installer is removed.
+; Rebase these registry definitions and early preservation calls on CLI upgrades.
 Unicode true
 ManifestDPIAware true
 ; Add in `dpiAwareness` `PerMonitorV2` to manifest for Windows 10 1607+ (note this should not affect lower versions since they should be able to ignore this and pick up `dpiAware` `true` set by `ManifestDPIAware true`)
@@ -18,6 +19,11 @@ ManifestDPIAwareness PerMonitorV2
   SetCompressor /SOLID "{{compression}}"
 !endif
 
+; Keep above includes to select signed plugins before any plugin command.
+{{#if signed_plugins_path}}
+!addplugindir "{{signed_plugins_path}}"
+{{/if}}
+
 !include MUI2.nsh
 !include FileFunc.nsh
 !include x64.nsh
@@ -26,6 +32,7 @@ ManifestDPIAwareness PerMonitorV2
 !include "FileAssociation.nsh"
 !include "Win\COM.nsh"
 !include "Win\Propkey.nsh"
+!include "Win\RestartManager.nsh"
 !include "StrFunc.nsh"
 ${StrCase}
 ${StrLoc}
@@ -261,7 +268,7 @@ Function PageReinstall
 
   ; Skip showing the page if passive
   ;
-  ; Note that we don't call this earlier at the begining
+  ; Note that we don't call this earlier at the beginning
   ; of this function because we need to populate some variables
   ; related to current installed version if detected and whether
   ; we are downgrading or not.
@@ -346,6 +353,12 @@ Function PageLeaveReinstall
   ${EndIf}
 
   reinst_uninstall:
+    ; The standard PREINSTALL hook runs after this page. Preserve the marker
+    ; before the previous NSIS uninstaller can delete bundled resources.
+    ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
+    !ifmacrodef OATS_PRESERVE_DATA_LOCATION
+      !insertmacro OATS_PRESERVE_DATA_LOCATION "$4"
+    !endif
     HideWindow
     ClearErrors
 
@@ -378,7 +391,7 @@ Function PageLeaveReinstall
         Abort
       ${EndIf}
 
-      ; Other erros? show generic error message and return to select un/reinstall page
+      ; Other errors? show generic error message and return to select un/reinstall page
       MessageBox MB_ICONEXCLAMATION "$(unableToUninstall)"
       Abort
     ${EndIf}
@@ -522,6 +535,9 @@ Function .onInit
   !if "${INSTALLMODE}" == "both"
     !insertmacro MULTIUSER_INIT
   !endif
+  !ifmacrodef OATS_PRESERVE_DATA_LOCATION
+    !insertmacro OATS_PRESERVE_DATA_LOCATION "$INSTDIR"
+  !endif
 FunctionEnd
 
 
@@ -643,7 +659,7 @@ Section Install
     !insertmacro NSIS_HOOK_PREINSTALL
   !endif
 
-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
@@ -780,7 +796,7 @@ Section Uninstall
     !insertmacro NSIS_HOOK_PREUNINSTALL
   !endif
 
-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
   ; Delete the app directory and its content from disk
   ; Copy main executable

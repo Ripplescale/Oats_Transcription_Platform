@@ -1,0 +1,19 @@
+.xx-folder-tab { display:inline-flex; align-items:center; gap:0; flex-shrink:0}
+.xx-folder-tab .xx-folder-menu { padding:5px; min-width:25px; width:25px; height:28px; background:transparent; border:0}
+.xx-note-item { display:flex; align-items:center; border-bottom:1px solid var(--xx-border)}
+.xx-note-item .xx-note-row { flex:1; min-width:0; border-bottom:0}
+.xx-note-menu { flex-shrink:0; margin-right:5px}
+.xx-note-tags { display:flex!important; flex-wrap:wrap; gap:4px; margin-top:6px}
+.xx-note-tags>span { font-size:10px; padding:2px 7px; border-radius:20px; background:var(--xx-surface-soft,#f0ece3); color:var(--xx-muted); white-space:normal; overflow-wrap:anywhere}
+.xx-tag-filters { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin:0 0 12px; color:var(--xx-muted); max-height:104px; overflow:auto; flex-shrink:0}
+.xx-tag-filters button,.xx-tag-drafts button,.xx-tag-suggestions button { display:inline-flex; align-items:center; gap:5px; border:1px solid var(--xx-border); border-radius:20px; padding:4px 9px; font-size:11px; overflow-wrap:anywhere; max-width:100%}
+.xx-tag-filters button[aria-pressed=true] { color:var(--xx-ink); background:var(--xx-surface-soft,#f0ece3); border-color:var(--xx-muted)}
+.xx-library-dialog-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:20px}
+.xx-library-field { display:flex; flex-direction:column; gap:7px; font-size:13px}
+.xx-library-field select,.xx-tag-input-row input { border:1px solid var(--xx-border); border-radius:8px; padding:10px; background:transparent; min-width:0; width:100%}
+.xx-tag-input-row { display:flex; gap:8px; margin:12px 0}
+.xx-tag-drafts,.xx-tag-suggestions { display:flex; flex-wrap:wrap; gap:6px; max-height:160px; overflow:auto}
+.xx-tag-drafts button { background:var(--xx-surface-soft,#f0ece3)}
+.xx-tag-suggestions button { color:var(--xx-muted)}
+.xx-tags-editor { min-width:0}
+.xx-note-item:focus-within { background:var(--xx-surface-soft,#f0ece3)}

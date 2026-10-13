@@ -2,6 +2,7 @@
 import copy
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import socket
 import tempfile
@@ -41,6 +42,50 @@ class LocalWorkerTests(unittest.TestCase):
 
     def journal(self, rows, tail=b''):
         (self.session/'timeline.jsonl').write_bytes(('\n'.join(json.dumps(r) for r in rows)+'\n').encode()+tail)
+
+    def test_compact_status_roundtrips_nested_unicode_and_default_documents_keep_format(self):
+        status = {'state':'running', 'segments_revision':4, 'segments':[
+            {'text':'आज की notes are ready.\nKeep both scripts.', 'start_seconds':0.125,
+             'recognition':{'warnings':[], 'provenance':{'mixed_code':True}},
+             'recovery':{'attempts':[{'text':'पहले words', 'selected':False, 'error':None}]}}]}
+        checkpoint = self.root/'status.json'
+        worker.write_json(checkpoint, status)
+        self.assertEqual(read_json(checkpoint), status)
+        compact = (json.dumps(status, ensure_ascii=False, allow_nan=False, separators=(',', ':'))+'\n')
+        self.assertEqual(checkpoint.read_bytes(), compact.replace('\n', os.linesep).encode('utf-8'))
+        self.assertFalse(checkpoint.with_name('status.json.tmp').exists())
+        ordinary = self.root/'document.json'
+        write_json(ordinary, status)
+        previous_format = json.dumps(status, indent=2, ensure_ascii=False, allow_nan=False)+'\n'
+        self.assertEqual(ordinary.read_bytes(), previous_format.replace('\n', os.linesep).encode('utf-8'))
+        self.assertEqual(read_json(ordinary), status)
+        self.assertLess(checkpoint.stat().st_size, ordinary.stat().st_size)
+
+    def test_compact_checkpoint_failed_replace_preserves_previous_bytes_and_retry_policy(self):
+        checkpoint = self.root/'status.json'
+        worker.write_json(checkpoint, {'state':'running', 'text':'saved शब्द'})
+        previous = checkpoint.read_bytes()
+        replacement = {'state':'complete', 'text':'new शब्द'}
+        with patch.object(Path, 'replace', side_effect=PermissionError('synthetic busy reader')) as replace, \
+                patch('sttbench.manifest.time.sleep') as sleep:
+            with self.assertRaisesRegex(PermissionError, 'busy reader'):
+                worker.write_json(checkpoint, replacement)
+        self.assertEqual(replace.call_count, 12)
+        self.assertEqual(sleep.call_count, 11)
+        self.assertEqual(checkpoint.read_bytes(), previous)
+        self.assertEqual(read_json(checkpoint), {'state':'running', 'text':'saved शब्द'})
+        self.assertEqual(read_json(checkpoint.with_name('status.json.tmp')), replacement)
+        worker.write_json(checkpoint, replacement)
+        self.assertEqual(read_json(checkpoint), replacement)
+        self.assertFalse(checkpoint.with_name('status.json.tmp').exists())
+
+    def test_invalid_compact_value_cannot_replace_existing_checkpoint(self):
+        checkpoint = self.root/'status.json'
+        worker.write_json(checkpoint, {'state':'running', 'text':'saved'})
+        previous = checkpoint.read_bytes()
+        with self.assertRaises(ValueError):
+            worker.write_json(checkpoint, {'timing':float('nan')})
+        self.assertEqual(checkpoint.read_bytes(), previous)
 
     def test_partial_tail_is_ignored_but_missing_chunk_fails(self):
         row = self.chunk(0, np.zeros(16000))
@@ -468,6 +513,114 @@ class LocalWorkerTests(unittest.TestCase):
         with patch.object(socket.socket,'connect',socket.socket.connect), patch.object(socket.socket,'connect_ex',socket.socket.connect_ex), patch.object(socket,'create_connection',socket.create_connection), patch.object(worker,'parent_alive',return_value=True), patch.object(worker,'transcribe',side_effect=infer), patch.object(worker,'assess_window',side_effect=self.keep_gate), patch.object(worker,'time') as clock:
             clock.sleep.side_effect=sleep or (lambda delay:self.fail('Unexpected wait for synthetic capture'))
             return worker.run(config,request)
+
+    def test_unchanged_idle_publishes_once_and_stop_still_checkpoints(self):
+        row = self.chunk(0, np.ones(16000)*1000)
+        config, request = self.transcription_job([row])
+        snapshots, waits = [], []
+        original_write = worker.write_json
+        def checkpoint(path, value):
+            snapshots.append(copy.deepcopy(value))
+            original_write(path, value)
+        def wait(delay):
+            waits.append(delay)
+            self.assertEqual(read_json(request.parent/'status.json')['state'], 'waiting_for_audio')
+            if len(waits) == 4:
+                (request.parent/'stop.request').write_text('stop', encoding='utf-8')
+        with patch.object(worker, 'write_json', side_effect=checkpoint):
+            result = self.run_synthetic(config, request,
+                lambda *args: self.fail('Incomplete live window must not infer'), wait)
+        idle = [s for s in snapshots if s['state'] == 'waiting_for_audio']
+        self.assertEqual(len(idle), 1)
+        self.assertEqual(waits, [.5]*4)
+        self.assertEqual([s['state'] for s in snapshots], ['waiting_for_audio', 'stopped'])
+        self.assertEqual(result['state'], 'stopped')
+        self.assertEqual(read_json(request.parent/'status.json'), result)
+
+    def test_changed_idle_audio_and_capture_event_publish_without_extra_inference(self):
+        first = self.chunk(0, np.ones(16000)*1000)
+        config, request = self.transcription_job([first])
+        snapshots, waits = [], []
+        original_write = worker.write_json
+        def checkpoint(path, value):
+            snapshots.append(copy.deepcopy(value))
+            original_write(path, value)
+        def wait(delay):
+            waits.append(delay)
+            if len(waits) == 2:
+                second = self.chunk(1, np.ones(16000)*1200, start=1)
+                self.journal([first, second])
+            elif len(waits) == 3:
+                rows = worker.journal_snapshot(self.session)[3]
+                self.journal([*rows, {'kind':'capture_stopped', 'at_seconds':2}])
+            elif len(waits) == 5:
+                (request.parent/'stop.request').write_text('stop', encoding='utf-8')
+        with patch.object(worker, 'write_json', side_effect=checkpoint):
+            result = self.run_synthetic(config, request,
+                lambda *args: self.fail('Incomplete live window must not infer'), wait)
+        idle = [s for s in snapshots if s['state'] == 'waiting_for_audio']
+        self.assertEqual([s['available_audio_seconds'] for s in idle], [1, 2, 2])
+        self.assertEqual([s['capture_event_count'] for s in idle], [1, 2, 3])
+        self.assertTrue(all(s['phase'] == 'waiting_for_audio' for s in idle))
+        self.assertEqual(result['state'], 'stopped')
+
+    def test_idle_phase_change_and_pending_recovery_keep_required_checkpoints(self):
+        first = self.chunk(0, np.ones(16000)*1000)
+        config, request = self.transcription_job([first])
+        snapshots, waits, calls = [], [], []
+        original_write = worker.write_json
+        def checkpoint(path, value):
+            snapshots.append(copy.deepcopy(value))
+            original_write(path, value)
+        def infer(spec, path, runtime):
+            calls.append(path.name)
+            return {'status':'ok', 'text':'वो जब था '*5 if path.name == 'microphone-0.wav'
+                    else self.recovery_text}
+        def wait(delay):
+            waits.append(delay)
+            if len(waits) == 1:
+                second = self.chunk(1, np.ones(19*16000)*1200, start=1)
+                self.journal([first, second])
+            elif len(waits) == 3:
+                rows = worker.journal_snapshot(self.session)[3]
+                future = self.chunk(2, np.ones(10*16000)*1400, start=20)
+                self.journal([*rows, future, {'kind':'capture_stopped', 'at_seconds':30},
+                              {'kind':'capture_finalized'}])
+            elif len(waits) > 3:
+                self.fail('Finalized recovery must finish without another idle wait')
+        with patch.object(worker, 'write_json', side_effect=checkpoint):
+            result = self.run_synthetic(config, request, infer, wait)
+        idle = [s for s in snapshots if s['state'] == 'waiting_for_audio']
+        self.assertEqual([s['phase'] for s in idle], ['waiting_for_audio', 'waiting_for_context'])
+        self.assertEqual([s['segments_revision'] for s in idle], [0, 1])
+        attempts = [s for s in snapshots if s.get('phase') == 'recovering_context'
+                    and any(segment.get('recovery', {}).get('attempts') for segment in s['segments'])]
+        self.assertTrue(attempts, 'The completed context attempt must still be checkpointed')
+        self.assertEqual(result['state'], 'complete', result.get('error'))
+        self.assertEqual(result['cursors']['microphone'], 30)
+        self.assertEqual(sum('-context-' in name for name in calls), 1)
+        self.assertEqual(read_json(request.parent/'status.json'), result)
+
+    def test_canonical_result_is_durable_before_fresh_journal_read(self):
+        row = self.chunk(0, np.ones(20*16000)*1000)
+        config, request = self.transcription_job([row], final_time=20)
+        calls, checked = [], []
+        original_snapshot = worker.journal_snapshot
+        def infer(*args):
+            calls.append(1)
+            return {'status':'ok', 'text':self.recovery_text}
+        def journal(session):
+            if calls:
+                saved = read_json(request.parent/'status.json')
+                self.assertEqual(saved['segments'][0]['text'], self.recovery_text)
+                self.assertEqual(saved['segments_revision'], 1)
+                self.assertEqual(saved['cursors']['microphone'], 20)
+                checked.append(1)
+            return original_snapshot(session)
+        with patch.object(worker, 'journal_snapshot', side_effect=journal):
+            result = self.run_synthetic(config, request, infer)
+        self.assertTrue(checked)
+        self.assertEqual(result['state'], 'complete')
 
     def test_live_pending_core_waits_while_other_track_continues_then_resumes_once(self):
         mic = self.chunk(0,np.ones(20*16000)*1000)

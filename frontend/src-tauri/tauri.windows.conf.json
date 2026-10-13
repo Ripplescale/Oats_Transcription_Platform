@@ -14,6 +14,8 @@
       "binaries/msvc-runtime": ".",
       "INSTALL-WINDOWS.txt": "INSTALL-WINDOWS.txt",
       "scripts/Start-xx.ps1": "Start-xx.ps1",
+      "scripts/dictation_worker.py": "dictation_worker.py",
+      "scripts/faster_whisper_dictation.py": "faster_whisper_dictation.py",
       "binaries/sttapp-local-install.json": "sttapp-local-install.json"
     }
   }

@@ -9,20 +9,132 @@ use tauri::Manager;
 static STORE_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn data_root() -> Result<PathBuf, String> {
-    let explicit=std::env::var_os("STTAPP_DATA_DIR").map(PathBuf::from);
-    let installed=if explicit.is_none() { std::env::current_exe().ok().and_then(|exe|exe.parent().map(|p|p.join("sttapp-local-install.json")))
-        .filter(|path|path.is_file()).map(|path|->Result<PathBuf,String> {
-            let value:serde_json::Value=serde_json::from_slice(&fs::read(path).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
-            value["data_root"].as_str().map(PathBuf::from).ok_or("Local installation manifest is missing data_root".into())
-        }).transpose()? } else { None };
-    if let Some(root)=explicit.or(installed) {
-        if !root.is_absolute() { return Err("STTAPP_DATA_DIR must be an absolute local directory".into()); }
-        if root.components().any(|part|part.as_os_str().to_string_lossy().to_lowercase().starts_with("onedrive")) {
-            return Err("Choose a local STTApp directory outside OneDrive".into());
-        }
-        return Ok(root);
+    let explicit = std::env::var_os("STTAPP_DATA_DIR").map(PathBuf::from);
+    if let Some(root) = explicit { return validate_data_root(root); }
+    let default = dirs::data_local_dir().map(|p| p.join("STTApp"))
+        .ok_or("Local application data directory is unavailable")?;
+    let installed = std::env::current_exe().ok()
+        .and_then(|exe| exe.parent().map(|p| p.join("sttapp-local-install.json")));
+    resolve_data_root(&default.join("data-location.json"), installed.as_deref(), default)
+}
+
+fn validate_data_root(root: PathBuf) -> Result<PathBuf, String> {
+    if !root.is_absolute() { return Err("STTAPP_DATA_DIR must be an absolute local directory".into()); }
+    if root.components().any(|part| part.as_os_str().to_string_lossy().to_lowercase().starts_with("onedrive")) {
+        return Err("Choose a local STTApp directory outside OneDrive".into());
     }
-    dirs::data_local_dir().map(|p| p.join("STTApp")).ok_or("Local application data directory is unavailable".into())
+    Ok(root)
+}
+
+fn read_data_location(path: &Path) -> Result<PathBuf, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !metadata.is_file() || is_link_or_reparse(&metadata) {
+        return Err("The saved data location must be an ordinary local file".into());
+    }
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("Could not read the saved data location. {e}"))?;
+    validate_data_root(value["data_root"].as_str().map(PathBuf::from)
+        .ok_or("The saved data location is missing data_root")?)
+}
+
+fn resolve_data_root(location: &Path, installed: Option<&Path>, default: PathBuf) -> Result<PathBuf, String> {
+    // An invalid saved choice must fail instead of silently opening empty notes elsewhere.
+    if location.try_exists().map_err(|e| e.to_string())? { return read_data_location(location); }
+    if let Some(path) = installed {
+        if path.try_exists().map_err(|e| e.to_string())? { return read_data_location(path); }
+    }
+    validate_data_root(default)
+}
+
+fn preserve_data_root_at(location: &Path, root: &Path) -> Result<(), String> {
+    validate_data_root(root.to_path_buf())?;
+    if location.try_exists().map_err(|e| e.to_string())? {
+        if read_data_location(location)? == root { return Ok(()); }
+        return Err("The current data location differs from the saved choice. Preserve your chosen location before updating.".into());
+    }
+    let parent = location.parent().ok_or("The saved data location has no parent directory")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let temporary = parent.join(format!("data-location-{}.part", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<(), String> {
+        let mut file = OpenOptions::new().create_new(true).write(true).open(&temporary).map_err(|e| e.to_string())?;
+        let value = serde_json::json!({ "version": 1, "data_root": root });
+        file.write_all(&serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
+        // Linking publishes a complete file without replacing a concurrent saved choice.
+        match fs::hard_link(&temporary, location) {
+            Ok(()) => Ok(()),
+            Err(error) if location.try_exists().unwrap_or(false) => {
+                if read_data_location(location)? == root { Ok(()) }
+                else { Err(format!("The data location changed while preparing the update. {error}")) }
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    })();
+    let _ = fs::remove_file(&temporary);
+    result
+}
+
+/// Keep the chosen location outside the installer before it replaces bundled files.
+pub fn preserve_data_root() -> Result<(), String> {
+    let root = data_root()?;
+    let location = dirs::data_local_dir().map(|p| p.join("STTApp").join("data-location.json"))
+        .ok_or("Local application data directory is unavailable")?;
+    preserve_data_root_at(&location, &root)
+}
+
+#[cfg(test)]
+mod data_location_tests {
+    use super::*;
+
+    #[test]
+    fn saved_location_survives_installer_manifest_removal() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("chosen-notes");
+        let default = temporary.path().join("default-data");
+        let marker = temporary.path().join("installed").join("sttapp-local-install.json");
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        fs::write(&marker, serde_json::to_vec(&serde_json::json!({ "data_root": root })).unwrap()).unwrap();
+        let location = default.join("data-location.json");
+        assert_eq!(resolve_data_root(&location, Some(&marker), default.clone()).unwrap(), root);
+        preserve_data_root_at(&location, &root).unwrap();
+        fs::remove_file(marker).unwrap();
+        assert_eq!(resolve_data_root(&location, None, default).unwrap(), root);
+    }
+
+    #[test]
+    fn preserved_choice_wins_over_a_different_installer_default() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("chosen-notes");
+        let location = temporary.path().join("preferences").join("data-location.json");
+        preserve_data_root_at(&location, &root).unwrap();
+        let marker = temporary.path().join("sttapp-local-install.json");
+        fs::write(&marker, serde_json::to_vec(&serde_json::json!({ "data_root": temporary.path().join("other") })).unwrap()).unwrap();
+        assert_eq!(resolve_data_root(&location, Some(&marker), temporary.path().join("default")).unwrap(), root);
+    }
+
+    #[test]
+    fn invalid_saved_location_does_not_silently_open_empty_notes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let location = temporary.path().join("data-location.json");
+        for value in ["unfinished json", "{}", "{\"data_root\":\"relative-folder\"}"] {
+            fs::write(&location, value).unwrap();
+            assert!(resolve_data_root(&location, None, temporary.path().join("default")).is_err());
+        }
+    }
+
+    #[test]
+    fn preserving_location_never_overwrites_another_saved_choice() {
+        let temporary = tempfile::tempdir().unwrap();
+        let location = temporary.path().join("data-location.json");
+        let root = temporary.path().join("chosen-notes");
+        preserve_data_root_at(&location, &root).unwrap();
+        let original = fs::read(&location).unwrap();
+        preserve_data_root_at(&location, &root).unwrap();
+        assert_eq!(fs::read(&location).unwrap(), original);
+        assert!(preserve_data_root_at(&location, &temporary.path().join("other")).is_err());
+        assert_eq!(fs::read(location).unwrap(), original);
+    }
 }
 
 pub fn previous_speaker_snapshot(id: &str) -> Result<Option<serde_json::Value>,String> {
@@ -91,6 +203,99 @@ fn append_revision(dir: &Path, expected: u64, mut value: serde_json::Value) -> R
     Ok(value)
 }
 
+const GENERATED_METADATA_REVISIONS_TO_KEEP: usize = 3;
+
+fn is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() { return true; }
+    #[cfg(windows)] {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 { return true; }
+    }
+    false
+}
+
+fn generated_metadata_directory(root: &Path, id: &str, kind: &str) -> Result<PathBuf, String> {
+    valid_id(id)?;
+    if !root.is_absolute() || root.components().any(|part| matches!(part, std::path::Component::ParentDir | std::path::Component::CurDir))
+        || !matches!(kind, "job-metadata" | "speaker-metadata") {
+        return Err("Generated metadata retention received an unsafe path".into());
+    }
+    let mut path = root.to_path_buf();
+    // Never follow a junction or link into another workspace or user history.
+    for component in [None, Some("workspaces"), Some(id), Some(kind)] {
+        if let Some(component) = component { path.push(component); }
+        let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if !metadata.is_dir() || is_link_or_reparse(&metadata) {
+            return Err("Generated metadata retention requires ordinary local directories".into());
+        }
+    }
+    let canonical_root = fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let canonical_dir = fs::canonicalize(path).map_err(|e| e.to_string())?;
+    if !canonical_dir.starts_with(&canonical_root) {
+        return Err("Generated metadata escaped the local data directory".into());
+    }
+    Ok(canonical_dir)
+}
+
+/// Generated snapshots are caches of complete worker metadata. User-authored
+/// workspace and vault revision streams never enter this retention path.
+fn prune_generated_metadata(root: &Path, id: &str, kind: &str) -> Result<usize, String> {
+    use sha2::{Digest, Sha256};
+    let dir = generated_metadata_directory(root, id, kind)?;
+    let mut revisions = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue; };
+        if !name.starts_with("revision-") || !name.ends_with(".json") { continue; }
+        let revision = name.strip_prefix("revision-").and_then(|s| s.strip_suffix(".json"))
+            .and_then(|s| s.parse::<u64>().ok()).filter(|n| *n > 0)
+            .ok_or("Generated metadata contains an invalid revision filename")?;
+        if name != format!("revision-{revision:012}.json") {
+            return Err("Generated metadata contains a noncanonical revision filename".into());
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if !metadata.is_file() || is_link_or_reparse(&metadata) {
+            return Err("Generated metadata contains an unsafe revision path".into());
+        }
+        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if value["revision"].as_u64() != Some(revision) {
+            return Err("Generated metadata is inconsistent; all snapshots were preserved".into());
+        }
+        let fingerprint: [u8; 32] = Sha256::digest(&bytes).into();
+        revisions.push((revision, path, fingerprint));
+    }
+    revisions.sort_by_key(|entry| entry.0);
+    let remove_count = revisions.len().saturating_sub(GENERATED_METADATA_REVISIONS_TO_KEEP);
+    if remove_count == 0 { return Ok(0); }
+    // Validate the whole batch before deleting anything. This also preserves
+    // every snapshot when the latest file is corrupt or numbering is ambiguous.
+    for (_, path, fingerprint) in &revisions {
+        let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if !metadata.is_file() || is_link_or_reparse(&metadata)
+            || <[u8; 32]>::from(Sha256::digest(fs::read(path).map_err(|e| e.to_string())?)) != *fingerprint {
+            return Err("Generated metadata changed during retention; snapshots were preserved".into());
+        }
+    }
+    if generated_metadata_directory(root, id, kind)? != dir {
+        return Err("Generated metadata directory changed during retention".into());
+    }
+    for (_, path, _) in revisions.iter().take(remove_count) {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(remove_count)
+}
+
+fn retain_generated_metadata(root: &Path, id: &str, kind: &str) {
+    // A completed save stays successful if an antivirus, permissions, or a
+    // damaged older snapshot prevents optional cleanup. Retry on the next save.
+    if let Err(error) = prune_generated_metadata(root, id, kind) {
+        log::warn!("Skipped generated metadata retention for {id}/{kind}: {error}");
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Correction {
     pub segment_id: String,
@@ -100,10 +305,42 @@ pub struct Correction {
 }
 
 fn empty_workspace(id: &str) -> serde_json::Value {
-    serde_json::json!({"version":1,"meeting_id":id,"revision":0,"notes":"","corrections":[],"project_id":null,"profile":null})
+    serde_json::json!({"version":1,"meeting_id":id,"revision":0,"notes":"","corrections":[],"project_id":null,"profile":null,"tags":[]})
+}
+
+// A folder deletion is one atomic tombstone. Existing workspace revisions and
+// source references remain intact, while all readers project its notes as Unfiled.
+fn effective_project(root: &Path, project: &serde_json::Value) -> Result<serde_json::Value, String> {
+    if let Some(id) = project.as_str() {
+        if latest_revision(&object_dir(root, "vaults", id)?)?.map(|v|v["archived"] == true).unwrap_or(false) {
+            return Ok(serde_json::Value::Null);
+        }
+    }
+    Ok(project.clone())
+}
+
+fn require_active_project(root: &Path, id: &str) -> Result<(), String> {
+    let project = latest_revision(&object_dir(root, "vaults", id)?)?.ok_or("Folder no longer exists. Choose a folder before saving.")?;
+    if project["archived"] == true { return Err("Folder was deleted. Reload before saving.".into()); }
+    Ok(())
+}
+
+fn apply_notes_document(value: &mut serde_json::Value, document: Option<serde_json::Value>, clear: bool) -> Result<(), String> {
+    if let Some(document) = document {
+        if document["type"] != "doc" || !document["content"].is_array() || serde_json::to_vec(&document).map_err(|e|e.to_string())?.len() > 4_000_000 {
+            return Err("Formatted note must be a document within the local size limit".into());
+        }
+        value["notes_document"] = document;
+    } else if clear {
+        value["notes_document"] = serde_json::Value::Null;
+    }
+    Ok(())
 }
 
 fn with_job_metadata(dir: &Path, mut value: serde_json::Value) -> Result<serde_json::Value,String> {
+    if let Some(root) = dir.parent().and_then(Path::parent) {
+        value["project_id"] = effective_project(root, &value["project_id"])?;
+    }
     // Worker progress has its own immutable revision stream. It must not make
     // a user's unsaved notes/corrections stale every twenty seconds.
     if let Some(metadata)=latest_revision(&dir.join("job-metadata"))? {
@@ -141,7 +378,9 @@ pub async fn save_transcript_workspace(
     state: tauri::State<'_, AppState>, meeting_id: String, expected_revision: u64,
     notes: String, corrections: Vec<Correction>, project_id: Option<String>, profile: Option<String>,
     speaker_names: Option<std::collections::HashMap<String,String>>,
+    notes_document: Option<serde_json::Value>, clear_notes_document: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    let _update_lease = crate::updates::start_lease()?;
     valid_id(&meeting_id)?;
     if notes.len() > 2_000_000 || corrections.len() > 20000 { return Err("Workspace is too large".into()); }
     if let Some(id) = &project_id { valid_id(id)?; }
@@ -158,8 +397,17 @@ pub async fn save_transcript_workspace(
         }
     }
     let _guard = STORE_LOCK.lock().map_err(|e| e.to_string())?;
-    let dir = object_dir(&data_root()?, "workspaces", &meeting_id)?;
+    let root = data_root()?;
+    // Historical workspaces can refer to an unavailable folder. Keep those
+    // editable, but do not let a stale editor resurrect a deleted folder.
+    if let Some(id) = &project_id {
+        if latest_revision(&object_dir(&root, "vaults", id)?)?.map(|value|value["archived"] == true).unwrap_or(false) {
+            return Err("Folder was deleted. Reload before saving.".into());
+        }
+    }
+    let dir = object_dir(&root, "workspaces", &meeting_id)?;
     let mut value = latest_revision(&dir)?.unwrap_or_else(|| empty_workspace(&meeting_id));
+    apply_notes_document(&mut value, notes_document, clear_notes_document.unwrap_or(false))?;
     if let Some(names)=speaker_names {
         if names.len()>100 || names.values().any(|name|name.len()>200) { return Err("Speaker names exceed local limits".into()); }
         for id in names.keys() { valid_id(id)?; }
@@ -176,13 +424,12 @@ pub async fn save_transcript_workspace(
 /// with a stale copy held by a notes-only editor.
 fn save_meeting_note_at(root: &Path, meeting_id: &str, expected_revision: u64,
     notes: String, project_id: Option<String>, legacy: Option<(Option<String>, Option<String>)>,
+    notes_document: Option<serde_json::Value>, clear_notes_document: bool,
 ) -> Result<serde_json::Value, String> {
     valid_id(meeting_id)?;
     if notes.len() > 2_000_000 { return Err("Note is too large".into()); }
     if let Some(id) = &project_id {
-        if latest_revision(&object_dir(root, "vaults", id)?)?.is_none() {
-            return Err("Project no longer exists. Choose a project before saving.".into());
-        }
+        require_active_project(root, id)?;
     }
     let dir = object_dir(root, "workspaces", meeting_id)?;
     let current = latest_revision(&dir)?;
@@ -197,7 +444,9 @@ fn save_meeting_note_at(root: &Path, meeting_id: &str, expected_revision: u64,
         return Err("This workspace changed in another window. Reload before saving.".into());
     }
     let project = serde_json::to_value(project_id).map_err(|e|e.to_string())?;
-    if current.is_some() && value["notes"] == notes && value["project_id"] == project {
+    let previous_document = value["notes_document"].clone();
+    apply_notes_document(&mut value, notes_document, clear_notes_document)?;
+    if current.is_some() && value["notes"] == notes && value["project_id"] == project && value["notes_document"] == previous_document {
         return with_job_metadata(&dir, value);
     }
     value["notes"] = notes.into();
@@ -208,7 +457,9 @@ fn save_meeting_note_at(root: &Path, meeting_id: &str, expected_revision: u64,
 #[tauri::command]
 pub async fn save_meeting_note(state: tauri::State<'_, AppState>, meeting_id: String,
     expected_revision: u64, notes: String, project_id: Option<String>,
+    notes_document: Option<serde_json::Value>, clear_notes_document: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    let _update_lease = crate::updates::start_lease()?;
     valid_id(&meeting_id)?;
     let exists: i64 = sqlx::query_scalar("SELECT count(*) FROM meetings WHERE id = ?")
         .bind(&meeting_id).fetch_one(state.db_manager.pool()).await.map_err(|e|e.to_string())?;
@@ -216,19 +467,24 @@ pub async fn save_meeting_note(state: tauri::State<'_, AppState>, meeting_id: St
     let legacy: Option<(Option<String>, Option<String>)> = sqlx::query_as("SELECT notes_markdown, notes_json FROM meeting_notes WHERE meeting_id = ?")
         .bind(&meeting_id).fetch_optional(state.db_manager.pool()).await.map_err(|e|e.to_string())?;
     let _guard = STORE_LOCK.lock().map_err(|e| e.to_string())?;
-    save_meeting_note_at(&data_root()?, &meeting_id, expected_revision, notes, project_id, legacy)
+    save_meeting_note_at(&data_root()?, &meeting_id, expected_revision, notes, project_id, legacy, notes_document, clear_notes_document.unwrap_or(false))
 }
 
 pub fn set_speaker_metadata(id: &str, job: &str, result: &serde_json::Value) -> Result<(),String> {
+    let _guard=STORE_LOCK.lock().map_err(|e|e.to_string())?;
+    set_speaker_metadata_at(&data_root()?,id,job,result)
+}
+
+fn set_speaker_metadata_at(root: &Path, id: &str, job: &str, result: &serde_json::Value) -> Result<(),String> {
     if !result["speakers"].is_array() || !result["turns"].is_array() || !result["segment_assignments"].is_object() {
         return Err("Speaker result is incomplete; prior names and assignments were preserved".into());
     }
-    let _guard=STORE_LOCK.lock().map_err(|e|e.to_string())?;
-    let dir=object_dir(&data_root()?,"workspaces",id)?.join("speaker-metadata");
+    let dir=object_dir(root,"workspaces",id)?.join("speaker-metadata");
     let previous=latest_revision(&dir)?;
     if previous.as_ref().map(|p|p["source_job_id"]==job && &p["result"]==result).unwrap_or(false) { return Ok(()); }
     let expected=previous.and_then(|p|p["revision"].as_u64()).unwrap_or(0);
     append_revision(&dir,expected,serde_json::json!({"version":1,"source_job_id":job,"result":result}))?;
+    retain_generated_metadata(root,id,"speaker-metadata");
     Ok(())
 }
 
@@ -276,6 +532,7 @@ fn set_job_metadata_at(root: &Path, id: &str, parent: &str, job: &str, status: &
     value["segments_revision"]=status["segments_revision"].clone();
     value["worker_updated_at"]=status["updated_at"].clone();
     append_revision(&dir,expected,value)?;
+    retain_generated_metadata(root,id,"job-metadata");
     Ok(())
 }
 
@@ -346,7 +603,7 @@ pub fn list_project_vaults() -> Result<Vec<serde_json::Value>, String> {
     let mut result = Vec::new();
     for entry in fs::read_dir(data_root()?.join("vaults")).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
-        if path.is_dir() { if let Some(vault) = latest_revision(&path)? { result.push(vault); } }
+        if path.is_dir() { if let Some(vault) = latest_revision(&path)? { if vault["archived"] != true { result.push(vault); } } }
     }
     result.sort_by_key(|v| v["name"].as_str().unwrap_or("").to_owned());
     Ok(result)
@@ -355,9 +612,11 @@ pub fn list_project_vaults() -> Result<Vec<serde_json::Value>, String> {
 #[tauri::command]
 pub fn save_project_vault(project_id: String, expected_revision: u64, name: String,
     entries: Vec<VaultEntry>, relationships: Vec<VaultRelationship>) -> Result<serde_json::Value, String> {
+    let _update_lease = crate::updates::start_lease()?;
     if name.trim().is_empty() || name.len() > 200 { return Err("A project vault needs a name".into()); }
     validate_vault(&entries, &relationships)?;
     let _guard = STORE_LOCK.lock().map_err(|e| e.to_string())?;
+    require_active_project(&data_root()?, &project_id)?;
     append_revision(&object_dir(&data_root()?, "vaults", &project_id)?, expected_revision,
         serde_json::json!({"version":1,"id":project_id,"name":name,"entries":entries,"relationships":relationships}))
 }
@@ -387,6 +646,7 @@ fn rename_project_at(root: &Path, project_id: &str, expected_revision: u64, name
     let name = validate_project_name(name)?;
     let dir = object_dir(root, "vaults", project_id)?;
     let mut value = latest_revision(&dir)?.ok_or("Project no longer exists")?;
+    if value["archived"] == true { return Err("Folder was deleted. Reload before renaming.".into()); }
     value["name"] = name.into();
     Ok(project_summary(&append_revision(&dir, expected_revision, value)?))
 }
@@ -403,6 +663,117 @@ pub fn rename_project(project_id: String, expected_revision: u64, name: String) 
     rename_project_at(&data_root()?, &project_id, expected_revision, &name)
 }
 
+fn archive_project_at(root: &Path, project_id: &str, expected_revision: u64) -> Result<serde_json::Value, String> {
+    let dir = object_dir(root, "vaults", project_id)?;
+    let mut value = latest_revision(&dir)?.ok_or("Folder no longer exists")?;
+    if value["archived"] == true { return Err("Folder was already deleted. Reload your notes.".into()); }
+    value["archived"] = true.into();
+    value["archived_at"] = Utc::now().to_rfc3339().into();
+    append_revision(&dir, expected_revision, value)
+}
+
+#[tauri::command]
+pub fn archive_project(project_id: String, expected_revision: u64) -> Result<serde_json::Value, String> {
+    let _guard = STORE_LOCK.lock().map_err(|e| e.to_string())?;
+    archive_project_at(&data_root()?, &project_id, expected_revision)
+}
+
+fn normalized_tags(tags: Vec<String>) -> Result<Vec<String>, String> {
+    if tags.len() > 30 { return Err("Use at most 30 tags per note".into()); }
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for tag in tags {
+        if tag.chars().any(char::is_control) { return Err("Tags cannot contain control characters".into()); }
+        let name = tag.split_whitespace().collect::<Vec<_>>().join(" ");
+        if name.is_empty() || name.chars().count() > 50 { return Err("Each tag needs between 1 and 50 characters".into()); }
+        if seen.insert(name.to_lowercase()) { result.push(name); }
+    }
+    result.sort_by_key(|tag|tag.to_lowercase());
+    Ok(result)
+}
+
+fn workspace_tags(value: &serde_json::Value) -> Result<Vec<String>, String> {
+    match value.get("tags") {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(tags) => normalized_tags(serde_json::from_value(tags.clone()).map_err(|_|"Stored tags could not be read")?),
+    }
+}
+
+fn global_tag_names(root: &Path) -> Result<Vec<String>, String> {
+    let dir = root.join("workspaces");
+    if !dir.exists() { return Ok(Vec::new()); }
+    let mut paths = fs::read_dir(dir).map_err(|e|e.to_string())?.map(|entry|entry.map(|e|e.path()).map_err(|e|e.to_string())).collect::<Result<Vec<_>,_>>()?;
+    paths.sort();
+    let mut names = std::collections::BTreeMap::new();
+    for path in paths {
+        if path.is_dir() {
+            if let Some(value) = latest_revision(&path)? {
+                for tag in workspace_tags(&value)? { names.entry(tag.to_lowercase()).or_insert(tag); }
+            }
+        }
+    }
+    Ok(names.into_values().collect())
+}
+
+fn metadata_workspace(root: &Path, meeting_id: &str, legacy: Option<(Option<String>, Option<String>)>) -> Result<(PathBuf, serde_json::Value), String> {
+    let dir = object_dir(root, "workspaces", meeting_id)?;
+    let mut value = latest_revision(&dir)?.unwrap_or_else(||empty_workspace(meeting_id));
+    if value["revision"] == 0 {
+        if let Some((notes, structured)) = legacy {
+            value["notes"] = notes.unwrap_or_default().into();
+            value["legacy_notes_json"] = serde_json::to_value(structured).map_err(|e|e.to_string())?;
+        }
+    }
+    Ok((dir, value))
+}
+
+fn set_meeting_tags_at(root: &Path, meeting_id: &str, expected_tags: Vec<String>, tags: Vec<String>, legacy: Option<(Option<String>, Option<String>)>) -> Result<serde_json::Value, String> {
+    let (dir, mut value) = metadata_workspace(root, meeting_id, legacy)?;
+    let current = workspace_tags(&value)?;
+    if current != normalized_tags(expected_tags)? { return Err("This note's tags changed. Reload before saving tags.".into()); }
+    let names = global_tag_names(root)?;
+    let mut tags = normalized_tags(tags)?;
+    for tag in &mut tags {
+        if let Some(name) = names.iter().find(|name|name.to_lowercase() == tag.to_lowercase()) { *tag = name.clone(); }
+    }
+    if current == tags { return with_job_metadata(&dir, value); }
+    let revision = value["revision"].as_u64().unwrap_or(0);
+    value["tags"] = serde_json::to_value(tags).map_err(|e|e.to_string())?;
+    with_job_metadata(&dir, append_revision(&dir, revision, value)?)
+}
+
+fn move_meeting_to_project_at(root: &Path, meeting_id: &str, expected_project_id: Option<String>, project_id: Option<String>, legacy: Option<(Option<String>, Option<String>)>) -> Result<serde_json::Value, String> {
+    let (dir, mut value) = metadata_workspace(root, meeting_id, legacy)?;
+    let current = effective_project(root, &value["project_id"])?;
+    if current != serde_json::to_value(expected_project_id).map_err(|e|e.to_string())? { return Err("This note moved to another folder. Reload before moving it.".into()); }
+    if let Some(id) = &project_id { require_active_project(root, id)?; }
+    let next = serde_json::to_value(project_id).map_err(|e|e.to_string())?;
+    if current == next { return with_job_metadata(&dir, value); }
+    let revision = value["revision"].as_u64().unwrap_or(0);
+    value["project_id"] = next;
+    with_job_metadata(&dir, append_revision(&dir, revision, value)?)
+}
+
+#[tauri::command]
+pub async fn set_meeting_tags(state: tauri::State<'_, AppState>, meeting_id: String, expected_tags: Vec<String>, tags: Vec<String>) -> Result<serde_json::Value, String> {
+    valid_id(&meeting_id)?;
+    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as("SELECT n.notes_markdown,n.notes_json FROM meetings m LEFT JOIN meeting_notes n ON n.meeting_id=m.id WHERE m.id=?")
+        .bind(&meeting_id).fetch_optional(state.db_manager.pool()).await.map_err(|e|e.to_string())?;
+    let legacy = row.ok_or("Note no longer exists. Your tags were not saved.")?;
+    let _guard = STORE_LOCK.lock().map_err(|e|e.to_string())?;
+    set_meeting_tags_at(&data_root()?, &meeting_id, expected_tags, tags, Some(legacy))
+}
+
+#[tauri::command]
+pub async fn move_meeting_to_project(state: tauri::State<'_, AppState>, meeting_id: String, expected_project_id: Option<String>, project_id: Option<String>) -> Result<serde_json::Value, String> {
+    valid_id(&meeting_id)?;
+    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as("SELECT n.notes_markdown,n.notes_json FROM meetings m LEFT JOIN meeting_notes n ON n.meeting_id=m.id WHERE m.id=?")
+        .bind(&meeting_id).fetch_optional(state.db_manager.pool()).await.map_err(|e|e.to_string())?;
+    let legacy = row.ok_or("Note no longer exists. It was not moved.")?;
+    let _guard = STORE_LOCK.lock().map_err(|e|e.to_string())?;
+    move_meeting_to_project_at(&data_root()?, &meeting_id, expected_project_id, project_id, Some(legacy))
+}
+
 fn library_meeting(root: &Path, id: String, title: String, created_at: String, legacy_notes: Option<String>) -> Result<serde_json::Value, String> {
     // Only materialized assignments count. Loading a legacy/default workspace
     // must not silently file unrelated recordings under the initial vault.
@@ -411,8 +782,8 @@ fn library_meeting(root: &Path, id: String, title: String, created_at: String, l
         .or(legacy_notes.as_deref()).unwrap_or("");
     let preview = notes.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(180).collect::<String>();
     Ok(serde_json::json!({"id":id,"title":title,"created_at":created_at,
-        "project_id":workspace.as_ref().map(|value|value["project_id"].clone()).unwrap_or(serde_json::Value::Null),
-        "notes_preview":preview}))
+        "project_id":effective_project(root, &workspace.as_ref().map(|value|value["project_id"].clone()).unwrap_or(serde_json::Value::Null))?,
+        "tags":workspace.as_ref().map(workspace_tags).transpose()?.unwrap_or_default(),"notes_preview":preview}))
 }
 
 #[tauri::command]
@@ -444,6 +815,151 @@ pub async fn local_get_meeting_audio(app: tauri::AppHandle, state: tauri::State<
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn snapshot_files(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files: Vec<_> = fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_file()).map(|path| {
+                let bytes = fs::read(&path).unwrap(); (path, bytes)
+            }).collect();
+        files.sort_by(|a,b| a.0.cmp(&b.0));
+        files
+    }
+
+    #[test]
+    fn generated_retention_preserves_latest_bytes_numbering_and_user_histories() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspaces/meeting-one");
+        let vault = root.path().join("vaults/project-one");
+        for dir in [&workspace, &vault] {
+            for revision in 0..6 {
+                append_revision(dir,revision,serde_json::json!({"notes":format!("edit {revision}"),"corrections":[{"text":"mine"}]})).unwrap();
+            }
+        }
+        let user_history = snapshot_files(&workspace);
+        let vault_history = snapshot_files(&vault);
+        for kind in ["job-metadata", "speaker-metadata"] {
+            let dir = workspace.join(kind);
+            for revision in 0..7 {
+                append_revision(&dir,revision,serde_json::json!({"source_job_id":"job","payload":revision})).unwrap();
+            }
+            let all = snapshot_files(&dir);
+            fs::write(dir.join("unrelated.part"), b"not a revision").unwrap();
+            assert_eq!(prune_generated_metadata(root.path(),"meeting-one",kind).unwrap(),4);
+            let kept: Vec<_> = snapshot_files(&dir).into_iter().filter(|(path,_)|path.extension().unwrap() == "json").collect();
+            assert_eq!(kept,all[4..], "Retained snapshots must remain byte-identical");
+            assert_eq!(latest_revision(&dir).unwrap().unwrap()["revision"],7);
+            assert!(append_revision(&dir,3,serde_json::json!({"payload":"stale"})).is_err());
+            assert_eq!(append_revision(&dir,7,serde_json::json!({"payload":"next"})).unwrap()["revision"],8);
+            assert_eq!(fs::read(dir.join("unrelated.part")).unwrap(),b"not a revision");
+        }
+        assert_eq!(snapshot_files(&workspace),user_history);
+        assert_eq!(snapshot_files(&vault),vault_history);
+    }
+
+    #[test]
+    fn committed_generated_saves_retain_three_snapshots_without_revising_notes() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("workspaces/meeting-one");
+        let note = append_revision(&dir,0,serde_json::json!({"notes":"saved draft","corrections":[]})).unwrap();
+        let note_bytes = fs::read(dir.join("revision-000000000001.json")).unwrap();
+        for revision in 1..=8 {
+            let status = serde_json::json!({"segments_revision":revision,"segments":[{"id":"s1","source_track":"system"}]});
+            set_job_metadata_at(root.path(),"meeting-one","meeting-one","job-one",&status).unwrap();
+            let result = serde_json::json!({"speakers":[],"turns":[],"segment_assignments":{},"generation":revision});
+            set_speaker_metadata_at(root.path(),"meeting-one","speaker-job",&result).unwrap();
+        }
+        for kind in ["job-metadata", "speaker-metadata"] {
+            assert_eq!(snapshot_files(&dir.join(kind)).len(),3);
+            assert_eq!(latest_revision(&dir.join(kind)).unwrap().unwrap()["revision"],8);
+        }
+        assert_eq!(latest_revision(&dir).unwrap().unwrap(),note);
+        assert_eq!(fs::read(dir.join("revision-000000000001.json")).unwrap(),note_bytes);
+        assert_eq!(with_job_metadata(&dir,note).unwrap()["segments_revision"],8);
+    }
+
+    #[test]
+    fn generated_retention_preserves_every_snapshot_when_latest_is_corrupt_or_inconsistent() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("workspaces/meeting-one/job-metadata");
+        for revision in 0..5 { append_revision(&dir,revision,serde_json::json!({"source_job_id":"job"})).unwrap(); }
+        for damaged in [b"{broken".as_slice(),br#"{"revision":4}"#.as_slice()] {
+            fs::write(dir.join("revision-000000000005.json"),damaged).unwrap();
+            let before = snapshot_files(&dir);
+            assert!(prune_generated_metadata(root.path(),"meeting-one","job-metadata").is_err());
+            assert!(set_job_metadata_at(root.path(),"meeting-one","meeting-one","job",&serde_json::json!({"segments":[]})).is_err());
+            assert_eq!(snapshot_files(&dir),before);
+        }
+    }
+
+    #[test]
+    fn generated_retention_rejects_unsafe_paths_and_noncanonical_revision_files() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("workspaces/meeting-one/job-metadata");
+        for revision in 0..5 { append_revision(&dir,revision,serde_json::json!({"source_job_id":"job"})).unwrap(); }
+        let before = snapshot_files(&dir);
+        for (id,kind) in [("../meeting-one","job-metadata"),("meeting-one",".."),("meeting-one","vaults"),("meeting-one","")] {
+            assert!(prune_generated_metadata(root.path(),id,kind).is_err());
+        }
+        assert!(prune_generated_metadata(Path::new("relative"),"meeting-one","job-metadata").is_err());
+        assert!(prune_generated_metadata(&root.path().join("workspaces/.."),"meeting-one","job-metadata").is_err());
+        assert_eq!(snapshot_files(&dir),before);
+        fs::write(dir.join("revision-5.json"),br#"{"revision":5}"#).unwrap();
+        let ambiguous = snapshot_files(&dir);
+        assert!(prune_generated_metadata(root.path(),"meeting-one","job-metadata").is_err());
+        assert_eq!(snapshot_files(&dir),ambiguous);
+    }
+
+    #[test]
+    fn failed_generated_cleanup_does_not_fail_a_committed_save() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("workspaces/meeting-one/job-metadata");
+        for revision in 0..4 { append_revision(&dir,revision,serde_json::json!({"source_job_id":"job"})).unwrap(); }
+        fs::write(dir.join("revision-000000000001.json"),b"damaged older history").unwrap();
+        let before = snapshot_files(&dir);
+        set_job_metadata_at(root.path(),"meeting-one","meeting-one","job",&serde_json::json!({"segments_revision":5,"segments":[]})).unwrap();
+        assert_eq!(latest_revision(&dir).unwrap().unwrap()["revision"],5);
+        assert_eq!(&snapshot_files(&dir)[..4],before);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn generated_retention_rejects_windows_junctions() {
+        use std::os::windows::process::CommandExt;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspaces/meeting-one");
+        fs::create_dir_all(&workspace).unwrap();
+        for revision in 0..5 { append_revision(outside.path(),revision,serde_json::json!({"source_job_id":"job"})).unwrap(); }
+        let before = snapshot_files(outside.path());
+        let junction = workspace.join("job-metadata");
+        let result = std::process::Command::new("powershell.exe")
+            .creation_flags(0x08000000)
+            .args(["-NoProfile","-NonInteractive","-Command",
+                "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:STT_RETENTION_TEST_LINK -Target $env:STT_RETENTION_TEST_TARGET | Out-Null"])
+            .env("STT_RETENTION_TEST_LINK",&junction).env("STT_RETENTION_TEST_TARGET",outside.path())
+            .output().unwrap();
+        assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+        assert!(prune_generated_metadata(root.path(),"meeting-one","job-metadata").is_err());
+        assert_eq!(snapshot_files(outside.path()),before);
+        fs::remove_dir(junction).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_retention_rejects_directory_and_file_links() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspaces/meeting-one");
+        fs::create_dir_all(&workspace).unwrap();
+        for revision in 0..5 { append_revision(outside.path(),revision,serde_json::json!({"source_job_id":"job"})).unwrap(); }
+        let before = snapshot_files(outside.path());
+        std::os::unix::fs::symlink(outside.path(),workspace.join("job-metadata")).unwrap();
+        assert!(prune_generated_metadata(root.path(),"meeting-one","job-metadata").is_err());
+        fs::create_dir(workspace.join("speaker-metadata")).unwrap();
+        std::os::unix::fs::symlink(&before[0].0,workspace.join("speaker-metadata/revision-000000000001.json")).unwrap();
+        assert!(prune_generated_metadata(root.path(),"meeting-one","speaker-metadata").is_err());
+        assert_eq!(snapshot_files(outside.path()),before);
+    }
+
     #[test]
     fn revisions_reject_conflicts_and_keep_prior_notes() {
         let root = tempfile::tempdir().unwrap();
@@ -555,7 +1071,7 @@ mod tests {
         initial["future_field"] = "keep me".into();
         let first = append_revision(&dir,0,initial).unwrap();
         append_revision(&dir.join("job-metadata"),0,serde_json::json!({"source_job_id":"job-one","segment_metadata":{"s1":{"source_track":"system"}},"profile":"trelis-20"})).unwrap();
-        let saved = save_meeting_note_at(root.path(),"meeting-one",1,"new note".into(),project["id"].as_str().map(str::to_owned),None).unwrap();
+        let saved = save_meeting_note_at(root.path(),"meeting-one",1,"new note".into(),project["id"].as_str().map(str::to_owned),None,None,false).unwrap();
         assert_eq!(saved["revision"],2);
         assert_eq!(saved["corrections"],first["corrections"]);
         assert_eq!(saved["speaker_names"],first["speaker_names"]);
@@ -564,9 +1080,9 @@ mod tests {
         assert_eq!(saved["segment_metadata"]["s1"]["source_track"],"system");
         assert_eq!(saved["project_id"],project["id"]);
         assert_eq!(latest_revision(&dir).unwrap().unwrap()["profile"],"trelis-20");
-        assert!(save_meeting_note_at(root.path(),"meeting-one",1,"stale note".into(),None,None).is_err());
+        assert!(save_meeting_note_at(root.path(),"meeting-one",1,"stale note".into(),None,None,None,false).is_err());
         assert_eq!(latest_revision(&dir).unwrap().unwrap()["notes"],"new note");
-        let unchanged = save_meeting_note_at(root.path(),"meeting-one",2,"new note".into(),project["id"].as_str().map(str::to_owned),None).unwrap();
+        let unchanged = save_meeting_note_at(root.path(),"meeting-one",2,"new note".into(),project["id"].as_str().map(str::to_owned),None,None,false).unwrap();
         assert_eq!(unchanged["revision"],2);
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&fs::read(dir.join("revision-000000000001.json")).unwrap()).unwrap(),first);
     }
@@ -574,11 +1090,11 @@ mod tests {
     #[test]
     fn note_autosave_rejects_missing_projects_and_keeps_legacy_structure() {
         let root = tempfile::tempdir().unwrap();
-        assert!(save_meeting_note_at(root.path(),"meeting-one",0,"draft".into(),Some("missing".into()),None).is_err());
+        assert!(save_meeting_note_at(root.path(),"meeting-one",0,"draft".into(),Some("missing".into()),None,None,false).is_err());
         assert!(!root.path().join("workspaces").exists());
-        assert!(save_meeting_note_at(root.path(),"meeting-one",0,"draft".into(),Some("../other".into()),None).is_err());
+        assert!(save_meeting_note_at(root.path(),"meeting-one",0,"draft".into(),Some("../other".into()),None,None,false).is_err());
         let saved = save_meeting_note_at(root.path(),"meeting-one",0,"draft".into(),None,
-            Some((Some("legacy".into()),Some("{\"original\":true}".into())))).unwrap();
+            Some((Some("legacy".into()),Some("{\"original\":true}".into()))),None,false).unwrap();
         assert_eq!(saved["legacy_notes_json"],"{\"original\":true}");
         assert_eq!(saved["notes"],"draft");
         assert!(saved["project_id"].is_null());
@@ -623,5 +1139,90 @@ mod tests {
         assert_eq!(row["project_id"],"prior-project");
         assert_eq!(row["notes_preview"].as_str().unwrap().chars().count(),180);
         assert!(empty_workspace("new")["project_id"].is_null());
+    }
+
+    #[test]
+    fn formatted_notes_are_atomic_conflict_safe_and_legacy_calls_preserve_them() {
+        let root = tempfile::tempdir().unwrap();
+        let doc = serde_json::json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Hello","marks":[{"type":"bold"}]}]}]});
+        let first = save_meeting_note_at(root.path(),"note-one",0,"Hello".into(),None,None,Some(doc.clone()),false).unwrap();
+        assert_eq!(first["notes_document"],doc);
+        let mut underlined = doc.clone();
+        underlined["content"][0]["content"][0]["marks"] = serde_json::json!([{"type":"underline"}]);
+        let formatted = save_meeting_note_at(root.path(),"note-one",1,"Hello".into(),None,None,Some(underlined.clone()),false).unwrap();
+        assert_eq!(formatted["revision"],2);
+        assert!(save_meeting_note_at(root.path(),"note-one",1,"stale".into(),None,None,Some(doc),false).is_err());
+        let unchanged = save_meeting_note_at(root.path(),"note-one",2,"Hello".into(),None,None,None,false).unwrap();
+        assert_eq!(unchanged["revision"],2);
+        assert_eq!(unchanged["notes_document"],underlined);
+        let cleared = save_meeting_note_at(root.path(),"note-one",2,"Hello".into(),None,None,None,true).unwrap();
+        assert_eq!(cleared["revision"],3);
+        assert!(cleared["notes_document"].is_null());
+        assert!(save_meeting_note_at(root.path(),"note-one",3,"bad".into(),None,None,Some(serde_json::json!({"type":"html"})),false).is_err());
+        assert_eq!(latest_revision(&root.path().join("workspaces/note-one")).unwrap().unwrap()["notes"],"Hello");
+    }
+
+    #[test]
+    fn tags_and_moves_merge_fresh_metadata_without_replacing_notes_or_references() {
+        let root = tempfile::tempdir().unwrap();
+        let project = create_project_at(root.path(),"Willow").unwrap();
+        let id = project["id"].as_str().unwrap().to_owned();
+        let dir = root.path().join("workspaces/note-one");
+        let mut initial = empty_workspace("note-one");
+        initial["notes"] = "newly saved draft".into();
+        initial["notes_document"] = serde_json::json!({"type":"doc","content":[]});
+        initial["corrections"] = serde_json::json!([{"text":"retained correction"}]);
+        initial["speaker_names"] = serde_json::json!({"one":"speaker"});
+        initial["future_field"] = "retained".into();
+        let first = append_revision(&dir,0,initial).unwrap();
+        let tagged = set_meeting_tags_at(root.path(),"note-one",vec![],vec!["  Follow-up  ".into(),"follow-UP".into(),"Research".into()],None).unwrap();
+        assert_eq!(tagged["tags"],serde_json::json!(["Follow-up","Research"]));
+        for field in ["notes","notes_document","corrections","speaker_names","future_field"] { assert_eq!(tagged[field],first[field]); }
+        let mut newer = latest_revision(&dir).unwrap().unwrap(); newer["notes"] = "draft saved after opening move dialog".into();
+        append_revision(&dir,2,newer).unwrap();
+        let moved = move_meeting_to_project_at(root.path(),"note-one",None,Some(id.clone()),None).unwrap();
+        assert_eq!(moved["revision"],4);
+        assert_eq!(moved["notes"],"draft saved after opening move dialog");
+        assert_eq!(moved["tags"],tagged["tags"]);
+        assert!(move_meeting_to_project_at(root.path(),"note-one",None,None,None).is_err());
+        assert!(set_meeting_tags_at(root.path(),"note-one",vec![],vec!["overwrite".into()],None).is_err());
+        let second = set_meeting_tags_at(root.path(),"note-two",vec![],vec!["follow-up".into()],Some((Some("legacy note".into()),Some("legacy structure".into())))).unwrap();
+        assert_eq!(second["tags"],serde_json::json!(["Follow-up"]));
+        assert_eq!(second["notes"],"legacy note");
+        assert_eq!(second["legacy_notes_json"],"legacy structure");
+        assert!(normalized_tags(vec!["\ninvalid".into()]).is_err());
+        assert!(normalized_tags(vec!["x".repeat(51)]).is_err());
+        assert!(normalized_tags((0..31).map(|n|format!("tag{n}")).collect()).is_err());
+        assert!(move_meeting_to_project_at(root.path(),"note-one",Some(id),Some("../escape".into()),None).is_err());
+    }
+
+    #[test]
+    fn deleting_a_folder_unfiles_notes_atomically_and_retains_reference_history() {
+        let root = tempfile::tempdir().unwrap();
+        let project = create_project_at(root.path(),"Willow").unwrap();
+        let id = project["id"].as_str().unwrap().to_owned();
+        let vault = root.path().join("vaults").join(&id);
+        let mut evidence = latest_revision(&vault).unwrap().unwrap();
+        evidence["entries"] = serde_json::json!([{"id":"checked","canonical":"reference","source":"original"}]);
+        evidence["relationships"] = serde_json::json!([{"source":"original"}]);
+        let prior = append_revision(&vault,1,evidence).unwrap();
+        save_meeting_note_at(root.path(),"note-one",0,"preserved note".into(),Some(id.clone()),None,None,false).unwrap();
+        let workspace = root.path().join("workspaces/note-one");
+        let original_bytes = fs::read(workspace.join("revision-000000000001.json")).unwrap();
+        assert!(archive_project_at(root.path(),&id,1).is_err());
+        let archived = archive_project_at(root.path(),&id,2).unwrap();
+        assert_eq!(archived["entries"],prior["entries"]); assert_eq!(archived["relationships"],prior["relationships"]);
+        assert_eq!(fs::read(workspace.join("revision-000000000001.json")).unwrap(),original_bytes);
+        let loaded = with_job_metadata(&workspace,latest_revision(&workspace).unwrap().unwrap()).unwrap();
+        assert!(loaded["project_id"].is_null()); assert_eq!(loaded["notes"],"preserved note");
+        let row = library_meeting(root.path(),"note-one".into(),"note".into(),"date".into(),None).unwrap();
+        assert!(row["project_id"].is_null());
+        assert!(require_active_project(root.path(),&id).is_err());
+        assert!(rename_project_at(root.path(),&id,3,"Resurrect").is_err());
+        assert!(save_meeting_note_at(root.path(),"note-one",1,"stale draft".into(),Some(id.clone()),None,None,false).is_err());
+        let destination = create_project_at(root.path(),"Research").unwrap()["id"].as_str().unwrap().to_owned();
+        let moved = move_meeting_to_project_at(root.path(),"note-one",None,Some(destination.clone()),None).unwrap();
+        assert_eq!(moved["project_id"],destination);
+        assert_eq!(moved["notes"],"preserved note");
     }
 }

@@ -38,10 +38,11 @@ def read_json(path: Path) -> Any:
                       parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"Invalid number: {value}")))
 
 
-def write_json(path: Path, value: Any) -> None:
+def write_json(path: Path, value: Any, *, compact: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")
+    formatting = {'indent': None, 'separators': (',', ':')} if compact else {'indent': 2}
+    temporary.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False, **formatting) + "\n", encoding="utf-8")
     # Windows readers and antivirus may briefly deny replacement even after
     # the writer has closed its file. Keep the old complete JSON until replace
     # succeeds; never fall back to truncating it in place.

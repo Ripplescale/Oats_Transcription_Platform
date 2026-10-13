@@ -253,7 +253,7 @@ pub fn start(app: &tauri::AppHandle) {
                         continue;
                     }
                 };
-                let recording = crate::audio::recording_commands::get_active_capture()
+                let recording = crate::dictation::is_busy() || crate::audio::recording_commands::get_active_capture()
                     .map(|s| s.is_some())
                     .unwrap_or(true)
                     || tauri::async_runtime::block_on(

@@ -21,6 +21,9 @@ import { SpeakerReviewPanel } from '@/components/MeetingDetails/SpeakerReviewPan
 import { useLocalWorkflow } from '@/contexts/LocalWorkflowContext';
 import { projectLabel, useProjectLibrary } from '@/hooks/useProjectLibrary';
 import { isTerminalJob } from '@/lib/local-transcription-workflow';
+import { RichNotesEditor } from '@/components/RichNotesEditor';
+import { MeetingTitle, type TitleEditState } from '@/components/MeetingDetails/MeetingTitle';
+import { registerUpdateSaveGuard } from '@/lib/update-safety';
 import './saved-note.css';
 
 export default function PageContent({ meeting, summaryData, onMeetingUpdated, hasMore, isLoadingMore, totalCount, onLoadMore }: {
@@ -40,6 +43,7 @@ export default function PageContent({ meeting, summaryData, onMeetingUpdated, ha
 }) {
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [displayTitle, setDisplayTitle] = useState(meeting.title);
+  const [titleEdit, setTitleEdit] = useState<TitleEditState>({ dirty: false, saving: false });
   const { projects, error: projectError } = useProjectLibrary();
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
@@ -56,19 +60,32 @@ export default function PageContent({ meeting, summaryData, onMeetingUpdated, ha
   const draftNotes = 'workflow_role' in review.workspace && review.workspace.workflow_role === 'live-draft';
   const fallbackNotes = review.workspace.workflow_role === 'fallback';
   const legacy = useMeetingData({ meeting, summaryData, onMeetingUpdated });
+  useEffect(() => {
+    if (legacy.isSummaryDirty || legacy.isSaving) return registerUpdateSaveGuard(async () => {
+      throw new Error('Save your summary changes before installing the update.');
+    });
+  }, [legacy.isSummaryDirty, legacy.isSaving]);
+  const renameTitle = async (title: string) => {
+    await invoke('api_save_meeting_title', { meetingId: meeting.id, title });
+    setDisplayTitle(title);
+    legacy.updateMeetingTitle(title);
+    window.dispatchEvent(new CustomEvent('xx-meeting-renamed', { detail: { id: meeting.id, title } }));
+  };
   const save = async () => {
     try { await review.save(); window.dispatchEvent(new Event('xx-projects-updated')); toast.success('Notes and corrections saved'); }
     catch { /* The persistent error retains unsaved edits in the workspace. */ }
   };
   useEffect(() => {
     setDisplayTitle(meeting.title);
+  }, [meeting.id, meeting.title]);
+  useEffect(() => {
     const renamed = (event: Event) => {
       const detail = (event as CustomEvent<{ id: string; title: string }>).detail;
       if (detail.id === meeting.id || detail.id === review.workspace.source_meeting_id) setDisplayTitle(detail.title);
     };
     window.addEventListener('xx-meeting-renamed', renamed);
     return () => window.removeEventListener('xx-meeting-renamed', renamed);
-  }, [meeting.id, meeting.title, review.workspace.source_meeting_id]);
+  }, [meeting.id, review.workspace.source_meeting_id]);
   useEffect(() => {
     let cancelled = false;
     setAudioPath(null); setAudioError(null);
@@ -89,7 +106,7 @@ export default function PageContent({ meeting, summaryData, onMeetingUpdated, ha
   const saveEnabled = useRef(false);
   saveEnabled.current = review.loaded && review.dirty && !review.saving;
   const needsSave = useRef(false);
-  needsSave.current = review.dirty || review.saving || correctionDraft;
+  needsSave.current = review.dirty || review.saving || correctionDraft || titleEdit.dirty || titleEdit.saving;
   const allowHistory = useRef(false);
   const pageIndex = useRef<number>();
   useEffect(() => {
@@ -169,7 +186,7 @@ export default function PageContent({ meeting, summaryData, onMeetingUpdated, ha
   return <div className="xx-saved-note">
     <section className="xx-saved-note-sheet" aria-label="Meeting notes">
         <header className="xx-saved-note-header">
-          <div className="xx-saved-note-title-row"><h1 className="xx-heading xx-saved-note-title">{displayTitle}</h1>
+          <div className="xx-saved-note-title-row"><MeetingTitle key={meeting.id} title={displayTitle} onSave={renameTitle} onStateChange={setTitleEdit} />
             <Popover><PopoverTrigger asChild><button type="button" className="xx-button-secondary !min-h-8 !px-2 text-xs"><Settings2 size={13} aria-hidden="true" />Tools<ChevronDown size={12} aria-hidden="true" /></button></PopoverTrigger>
               <ToolsPortal forceMount><ToolsContent forceMount align="end" sideOffset={10} aria-label="Meeting tools" className="data-[state=closed]:hidden z-50 border shadow-lg outline-none w-[380px] max-w-[calc(100vw-32px)] max-h-[min(680px,calc(100vh-120px))] overflow-y-auto rounded-2xl border-[var(--xx-border)] bg-[var(--xx-paper)] p-4 text-[var(--xx-ink)] space-y-3">
                 <div><h3 className="font-medium text-sm">Meeting tools</h3><p className="mt-1 text-xs text-[var(--xx-muted)]">Fine-tune this meeting when you need to.</p></div>
@@ -183,14 +200,14 @@ export default function PageContent({ meeting, summaryData, onMeetingUpdated, ha
           <div className="xx-saved-note-meta">
             <label className="xx-saved-note-project"><Folder size={13} aria-hidden="true" /><select aria-label="Meeting project" title={projectError ?? 'Organize this note by project'} disabled={!review.loaded || review.saving || !!projectError} value={review.workspace.project_id ?? ''} onChange={event => review.updateProject(event.target.value || null)}><option value="">No project</option>{review.workspace.project_id && !projects.some(project => project.id === review.workspace.project_id) && <option value={review.workspace.project_id}>{review.workspace.project_id}</option>}{projects.map(project => <option key={project.id} value={project.id}>{projectLabel(project.name)}</option>)}</select></label>
             <span className="xx-saved-note-layer">{fallbackNotes ? 'Notes for this fallback' : draftNotes ? 'Notes for this draft' : 'My notes'}</span>
-            <span role="status" className="xx-saved-note-status">{!review.loaded ? 'Loading…' : review.saving ? 'Saving…' : review.error ? 'Not saved' : correctionDraft ? 'Correction in progress' : review.dirty ? 'Unsaved changes' : <><Check size={12} aria-hidden="true" />Saved</>}</span>
+            <span role="status" className="xx-saved-note-status">{titleEdit.saving ? 'Saving title…' : titleEdit.dirty ? 'Unsaved title' : !review.loaded ? 'Loading…' : review.saving ? 'Saving…' : review.error ? 'Not saved' : correctionDraft ? 'Correction in progress' : review.dirty ? 'Unsaved changes' : <><Check size={12} aria-hidden="true" />Saved</>}</span>
             {(review.error || (review.dirty && correctionDraft)) && <button type="button" className="xx-button-secondary !min-h-7 !py-1 !px-2 text-xs" title="Save notes and applied corrections (Ctrl+S)" disabled={!review.loaded || review.saving || !review.dirty} onClick={() => void save()}>Save changes</button>}
           </div>
         </header>
         {review.error && <p role="alert" className="mx-5 mt-3 max-h-28 overflow-y-auto rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 break-words">{review.error}</p>}
         {transcriptionError && !transcriptOpen && <p role="alert" className="mx-5 mb-2 text-xs text-amber-800">Audio is saved. Transcription needs attention. <button type="button" className="underline underline-offset-2" onClick={() => setTranscriptOpen(true)}>View transcript</button></p>}
         <div className={`xx-saved-note-body${transcriptOpen ? ' has-transcript' : ''}`}>
-          <div className="xx-saved-note-canvas"><textarea aria-label="Meeting notes" placeholder={'What would you like to remember?\n\nA thought, a decision, a next step…'} className="xx-saved-note-editor" disabled={!review.loaded} value={review.workspace.notes} onChange={event => review.updateNotes(event.target.value)} /></div>
+          <div className="xx-saved-note-canvas"><RichNotesEditor key={meeting.id} notes={review.workspace.notes} document={review.workspace.notes_document} onChange={review.updateNotes} disabled={!review.loaded} ariaLabel="Meeting notes" placeholder="What would you like to remember?" /></div>
           <div id="saved-note-transcript" role="region" aria-label="Transcript" className="xx-saved-note-transcript" hidden={!transcriptOpen}>
             <TranscriptWorkspacePanel compact playback={{ audio, path: audioPath, onError: setAudioError }} meeting={meeting} review={review} hasMore={hasMore} isLoadingMore={isLoadingMore} totalCount={totalCount} onLoadMore={onLoadMore} onDraftChange={setCorrectionDraft} />
           </div>
@@ -203,7 +220,8 @@ export default function PageContent({ meeting, summaryData, onMeetingUpdated, ha
         </footer>
         {audioError && <p role="alert" className="xx-saved-note-audio-error">{audioError}</p>}
     </section>
-    <Dialog open={pendingNavigation !== null} onOpenChange={open => { if (!open) setPendingNavigation(null); }}><DialogContent className="rounded-2xl border-[var(--xx-border)] bg-[var(--xx-paper)] text-[var(--xx-ink)] max-w-sm"><DialogHeader><DialogTitle>Keep your changes?</DialogTitle><DialogDescription className="text-[var(--xx-muted)]">This meeting has unsaved notes or corrections. Stay here to save them before leaving.</DialogDescription></DialogHeader><DialogFooter className="gap-2"><button className="xx-button-secondary text-sm" onClick={() => {
+    <Dialog open={pendingNavigation !== null} onOpenChange={open => { if (!open) setPendingNavigation(null); }}><DialogContent className="rounded-2xl border-[var(--xx-border)] bg-[var(--xx-paper)] text-[var(--xx-ink)] max-w-sm"><DialogHeader><DialogTitle>Keep your changes?</DialogTitle><DialogDescription className="text-[var(--xx-muted)]">This meeting has an unsaved title, notes, or corrections. Stay here to save them before leaving.</DialogDescription></DialogHeader><DialogFooter className="gap-2"><button className="xx-button-secondary text-sm" disabled={review.saving || titleEdit.saving} onClick={() => {
+      if (!review.discardDraft()) return;
       const next = pendingNavigation; setPendingNavigation(null);
       if (!next) return;
       needsSave.current = false;

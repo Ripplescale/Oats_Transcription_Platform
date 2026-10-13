@@ -5,6 +5,7 @@ import { TranscriptView } from '@/components/TranscriptView';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { useMemo } from 'react';
+import { useDisplayMode } from '@/contexts/DisplayModeContext';
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -49,6 +50,7 @@ export function TranscriptPanel({
   meetingFolderPath,
   onRefetchTranscripts,
 }: TranscriptPanelProps) {
+  const { isDev } = useDisplayMode();
   // Convert transcripts to segments if pagination is not used but we want virtualization
   const convertedSegments = useMemo(() => {
     if (usePagination && segments) {
@@ -87,7 +89,7 @@ export function TranscriptPanel({
           isProcessing={false}
           isStopping={false}
           enableStreaming={false}
-          showConfidence={true}
+          showConfidence={isDev}
           disableAutoScroll={disableAutoScroll}
           hasMore={hasMore}
           isLoadingMore={isLoadingMore}

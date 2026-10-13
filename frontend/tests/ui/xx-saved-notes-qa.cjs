@@ -30,6 +30,7 @@ async function main() {
   try {
     await installFixture(page);
     await page.addInitScript(() => {
+      localStorage.setItem('xx-display-mode', 'dev');
       window.qaRetryPieces = ['Please bring the notebooks.', Array(12).fill('जब').join(' '), 'The studio opens at three.', "Let's meet by the door."];
       window.qaRetryText = window.qaRetryPieces.join('\n\n');
       window.qaRetryOriginal = 'वो जब था '.repeat(18).trim();
@@ -64,7 +65,7 @@ async function main() {
     const notes = page.getByRole('textbox', { name: 'Meeting notes', exact: true });
     const transcript = page.getByRole('region', { name: 'Transcript', exact: true });
     await notes.waitFor();
-    await page.waitForFunction(() => !document.querySelector('textarea[aria-label="Meeting notes"]').disabled);
+    await page.waitForFunction(() => document.querySelector('[role="textbox"][aria-label="Meeting notes"]')?.getAttribute('contenteditable') === 'true');
     assert.equal(await transcript.isVisible(), false);
     assert.equal(await page.getByRole('button', { name: 'Show transcript', exact: true }).getAttribute('aria-expanded'), 'false');
     assert.equal(await page.locator('audio').count(), 1);
@@ -75,7 +76,7 @@ async function main() {
       await page.waitForTimeout(250);
       const layout = await page.evaluate(() => {
         const rect = selector => { const r = document.querySelector(selector).getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height, right: r.right, bottom: r.bottom }; };
-        return { width: innerWidth, height: innerHeight, scrollWidth: document.documentElement.scrollWidth, scrollHeight: document.documentElement.scrollHeight, notes: rect('textarea[aria-label="Meeting notes"]'), audio: rect('audio'), toggle: rect('.xx-saved-note-transcript-toggle') };
+        return { width: innerWidth, height: innerHeight, scrollWidth: document.documentElement.scrollWidth, scrollHeight: document.documentElement.scrollHeight, notes: rect('[role="textbox"][aria-label="Meeting notes"]'), audio: rect('audio'), toggle: rect('.xx-saved-note-transcript-toggle') };
       });
       assert.ok(layout.scrollWidth <= width + 1 && layout.scrollHeight <= height + 1, `Page overflow at ${width}x${height}`);
       assert.ok(layout.notes.width > 420 && layout.notes.height > 230, `Writing canvas too small at ${width}x${height}`);
@@ -152,7 +153,7 @@ async function main() {
     await page.getByRole('status').filter({ hasText: /^Saving…$/ }).waitFor();
     await notes.fill('Newer edits typed while the first save is in flight.');
     await page.waitForFunction(() => window.qaWorkspace().notes === 'Newer edits typed while the first save is in flight.');
-    assert.equal(await notes.inputValue(), 'Newer edits typed while the first save is in flight.');
+    assert.equal(await notes.innerText(), 'Newer edits typed while the first save is in flight.');
     await page.evaluate(() => { window.qaSaveDelay = 0; });
     report.checks.push('A slower save never replaces edits typed during that save');
 
@@ -197,7 +198,7 @@ async function main() {
     await page.getByRole('alert').filter({ hasText: 'Fictional disk write failure' }).waitFor();
     await page.waitForTimeout(1300);
     assert.equal(await page.evaluate(() => window.qaSaveFailures), 1, 'A failed save does not cause an automatic retry loop');
-    assert.equal(await notes.inputValue(), 'Keep these fictional edits when saving fails.');
+    assert.equal(await notes.innerText(), 'Keep these fictional edits when saving fails.');
     await page.evaluate(() => window.dispatchEvent(new CustomEvent('xx-before-navigate', { cancelable: true, detail: { href: '/' } })));
     await page.getByRole('dialog', { name: 'Keep your changes?' }).waitFor();
     await page.getByRole('button', { name: 'Stay here', exact: true }).click();
