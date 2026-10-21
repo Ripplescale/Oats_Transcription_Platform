@@ -2,7 +2,7 @@
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
     "productName": "oats",
     "mainBinaryName": "xx",
-    "version": "0.8.4",
+    "version": "0.8.6",
     "identifier": "com.sttapp.local",
     "build": {
         "frontendDist": "../out",

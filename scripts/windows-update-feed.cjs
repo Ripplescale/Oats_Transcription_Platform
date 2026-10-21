@@ -5,7 +5,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const REPOSITORY = 'Ripplescale/Hinglish-Transcription-Platform';
+const REPOSITORY = 'Ripplescale/Oats_Transcription_Platform';
+// GitHub redirects this previous name to the same repository. Installed 0.8.3–
+// 0.8.5 clients only accept this asset path, so keep it in the shared feed.
+const DOWNLOAD_REPOSITORY = 'Ripplescale/Hinglish-Transcription-Platform';
 const MAX_INSTALLER = 512 * 1024 * 1024;
 function requireThat(value, message) { if (!value) throw new Error(message); }
 function versionName(version) {
@@ -59,7 +62,7 @@ function validateManifest(manifest, installerPath, publicKey) {
   requireThat(typeof manifest.pub_date === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(manifest.pub_date) && Number.isFinite(Date.parse(manifest.pub_date)), 'Release date must be RFC 3339.');
   requireThat(manifest.platforms && Object.keys(manifest.platforms).join() === 'windows-x86_64', 'Only the qualified Windows x64 platform is supported.');
   const platform = manifest.platforms['windows-x86_64'];
-  requireThat(platform.url === `https://github.com/${REPOSITORY}/releases/download/v${manifest.version}/${asset}`, 'Unexpected release repository, tag or installer URL.');
+  requireThat(platform.url === `https://github.com/${DOWNLOAD_REPOSITORY}/releases/download/v${manifest.version}/${asset}`, 'Unexpected release repository, tag or installer URL.');
   const installer = boundedRead(installerPath, MAX_INSTALLER);
   verifySignedInstaller(installer, platform.signature, publicKey, manifest.version);
   return { version: manifest.version, bytes: installer.length, sha256: crypto.createHash('sha256').update(installer).digest('hex') };
@@ -70,7 +73,7 @@ function createFeed(version, installerPath, keyPath, notesPath, outputDirectory)
   const notes = boundedRead(notesPath, 80000).toString('utf8');
   const asset = versionName(version);
   const manifest = { version, notes, pub_date: new Date().toISOString(), platforms: {
-    'windows-x86_64': { url: `https://github.com/${REPOSITORY}/releases/download/v${version}/${asset}`, signature },
+    'windows-x86_64': { url: `https://github.com/${DOWNLOAD_REPOSITORY}/releases/download/v${version}/${asset}`, signature },
   } };
   const result = validateManifest(manifest, installerPath, publicKey);
   const latest = path.join(outputDirectory, 'latest.json');
@@ -109,7 +112,7 @@ function prepareStage(root, version) {
   fs.copyFileSync(path.join(root, 'scripts', 'public-release-WINDOWS.txt'), path.join(nativeRoot, 'INSTALL-WINDOWS.txt'));
   requireThat(!fs.existsSync(path.join(nativeRoot, 'binaries', 'sttapp-local-install.json')), 'A workstation marker must never enter the release stage.');
 }
-module.exports = { REPOSITORY, MAX_INSTALLER, versionName, parsePublicKey, verifySignedInstaller, validateManifest, createFeed, prepareStage };
+module.exports = { REPOSITORY, DOWNLOAD_REPOSITORY, MAX_INSTALLER, versionName, parsePublicKey, verifySignedInstaller, validateManifest, createFeed, prepareStage };
 if (require.main === module) {
   try {
     const [command, ...args] = process.argv.slice(2);

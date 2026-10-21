@@ -4,9 +4,11 @@ use std::sync::{Arc, Mutex};
 
 pub const HANDOFF_BUSY: &str = "An app update is being installed. Try again after oats restarts.";
 const ASSET_PREFIX: &str =
+    "https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/";
+const LEGACY_ASSET_PREFIX: &str =
     "https://github.com/Ripplescale/Hinglish-Transcription-Platform/releases/download/";
 pub fn approved_asset(address: &str, version: &str) -> bool {
-    let Some(rest) = address.strip_prefix(ASSET_PREFIX) else {
+    let Some(rest) = address.strip_prefix(ASSET_PREFIX).or_else(|| address.strip_prefix(LEGACY_ASSET_PREFIX)) else {
         return false;
     };
     let Some((tag, asset)) = rest.split_once('/') else {
@@ -268,6 +270,22 @@ mod tests {
             valid.replace("/releases/download/", "/raw/"),
         ] {
             assert!(!approved_asset(&invalid, "0.8.3"), "{invalid}");
+        }
+    }
+    #[test]
+    fn renamed_repository_and_legacy_redirect_keep_the_same_installer_boundary() {
+        for prefix in [ASSET_PREFIX, LEGACY_ASSET_PREFIX] {
+            let address = format!("{prefix}v0.8.6/oats_0.8.6_x64-setup.exe");
+            assert!(approved_asset(&address, "0.8.6"));
+            assert!(!approved_asset(&address, "0.8.5"));
+            for invalid in [
+                address.replace("github.com/", "github.com.evil/"),
+                address.replace("Ripplescale/", "someone/"),
+                address.replace("/releases/", "-other/releases/"),
+                format!("{address}?redirect=elsewhere"),
+            ] {
+                assert!(!approved_asset(&invalid, "0.8.6"), "{invalid}");
+            }
         }
     }
     #[test]

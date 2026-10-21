@@ -89,6 +89,13 @@ Push-Location $frontendRoot
 try {
     & $pnpm install --frozen-lockfile
     if ($LASTEXITCODE -ne 0) { throw 'Frozen frontend dependency installation failed.' }
+    & $node --test (Join-Path $sourceRoot 'scripts/windows-update-feed.test.cjs') (Join-Path $frontendRoot 'tests/lib/updates.test.cjs') (Join-Path $frontendRoot 'tests/lib/local-transcription-workflow.test.cjs') (Join-Path $frontendRoot 'tests/lib/note-autosaver.test.cjs') (Join-Path $frontendRoot 'tests/lib/transcript-workspace.test.cjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Release regression checks failed. No installer was published.' }
+    $policyTests = Join-Path $StageRoot 'updater-policy-tests.exe'
+    & rustc --test --edition=2021 (Join-Path $nativeRoot 'src/updates/policy.rs') -o $policyTests
+    if ($LASTEXITCODE -ne 0) { throw 'Updater policy tests did not compile.' }
+    & $policyTests
+    if ($LASTEXITCODE -ne 0) { throw 'Updater policy tests failed. No installer was published.' }
     $cli = Join-Path $frontendRoot 'node_modules\@tauri-apps\cli\tauri.js'
     $signerHelp = & $node $cli signer sign --help
     if ($LASTEXITCODE -ne 0 -or ($signerHelp -join "`n") -notmatch '\-\-app-version') { throw 'The frozen Tauri CLI lacks signed-version support. Upgrade and review its package lock before releasing.' }

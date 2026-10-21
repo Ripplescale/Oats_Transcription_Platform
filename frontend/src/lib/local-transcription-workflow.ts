@@ -43,6 +43,7 @@ export class LocalWorkflow {
   state: WorkflowState;
   private locks = new Map<string, Promise<void>>();
   private ticking = false;
+  // Serialize launch commands; running transcription and speaker processes have separate slots.
   private startInFlight = false;
   private startingRun?: WorkflowRun;
   private notifiedStopped = new Set<string>();
@@ -188,8 +189,11 @@ export class LocalWorkflow {
       run.meetingId = result.meeting_id; run.error = run.stopError; this.changed();
     } catch (error) { run.error = `Audio is saved, but its meeting could not be linked. ${String(error)}`; this.changed(); }
   }
-  private activeWorker() {
-    return this.state.runs.some(run => (run.job && !isTerminalJob(run.job.state)) || (run.speakerJob && !isTerminalJob(run.speakerJob.state)));
+  private activeTranscription() {
+    return this.state.runs.some(run => run.job && !isTerminalJob(run.job.state));
+  }
+  private activeSpeaker() {
+    return this.state.runs.some(run => run.speakerJob && !isTerminalJob(run.speakerJob.state));
   }
   private draftSettled(run: WorkflowRun) {
     const draft = this.state.runs.find(item => item.role === 'live-draft' && this.sameCapture(item, run.capture));
@@ -208,6 +212,10 @@ export class LocalWorkflow {
       && run.importedCount === run.job.segments.length && run.importedState === run.job.state
       && run.importedRevision === run.job.segments_revision;
   }
+  private speakerSourceReady(run: WorkflowRun) {
+    return run.role !== 'live-draft' && !run.recording && !run.pausedByUser && !run.needsRecovery
+      && run.job?.state === 'complete' && !!run.transcriptMeetingId && this.checkpointSettled(run);
+  }
   private eligible(run: WorkflowRun) {
     if (run.pausedByUser || run.needsRecovery || run.error || !run.meetingId) return false;
     if (run.role === 'live-draft' && (!run.recording || run.captureEnded || run.draftSkipped)) return false;
@@ -218,7 +226,7 @@ export class LocalWorkflow {
     return !run.job || (!!run.resumeRequested && ['failed', 'stopped'].includes(run.job.state));
   }
   private async start(run: WorkflowRun) {
-    if (run.job || this.startInFlight || this.activeWorker() || !this.eligible(run)) return;
+    if (run.job || this.startInFlight || this.activeTranscription() || !this.eligible(run)) return;
     this.startInFlight = true; this.startingRun = run;
     try {
       const args: Record<string, unknown> = { sessionDir: run.capture.session_dir, profile: run.preferences.profile, languageMode: run.preferences.languageMode, projectId: null };
@@ -233,7 +241,7 @@ export class LocalWorkflow {
     } finally { this.startInFlight = false; this.startingRun = undefined; this.changed(); }
   }
   private async resume(run: WorkflowRun) {
-    if (!run.job || this.startInFlight || this.activeWorker() || !this.eligible(run)) return;
+    if (!run.job || this.startInFlight || this.activeTranscription() || !this.eligible(run)) return;
     this.startInFlight = true; run.resumeRequested = false;
     try {
       const next = await this.dependencies.invoke<Partial<LocalJob>>('resume_local_transcription', { jobId: run.job.job_id });
@@ -363,7 +371,7 @@ export class LocalWorkflow {
     this.changed();
   }
   async retrySpeakers(run: WorkflowRun) {
-    if (run.role === 'live-draft' || run.recording || run.pausedByUser || this.startInFlight || this.activeWorker()) return;
+    if (!this.speakerSourceReady(run) || this.startInFlight || this.activeSpeaker()) return;
     this.startInFlight = true; run.speakerError = undefined;
     try {
       if (run.speakerJob) run.speakerJob = await this.dependencies.invoke<SpeakerJob>('retry_speaker_identification', { jobId: run.speakerJob.job_id });
@@ -414,11 +422,10 @@ export class LocalWorkflow {
       const priority = (run: WorkflowRun) => run.role === 'fallback' ? 0 : run.role === 'live-final' ? 1 : run.role === 'final' ? 2 : run.role === 'live-draft' ? 4 : 3;
       const queued = this.state.runs.filter(run => this.eligible(run)).sort((a, b) => priority(a) - priority(b))[0];
       if (queued) { if (queued.job) await this.resume(queued); else await this.start(queued); }
-      if (!queued && !this.activeWorker()) {
+      if (!this.activeSpeaker()) {
         if (!this.state.speakerSetup) await this.checkSpeakerSetup();
         if (this.state.speakerSetup?.available && this.state.speakerSetup.enabled !== false) {
-          const next = this.state.runs.find(run => run.role !== 'live-draft' && !run.recording && !run.pausedByUser && run.job?.state === 'complete'
-            && run.importedState === 'complete' && run.transcriptMeetingId && !run.speakerJob && !run.speakerError && !run.error);
+          const next = this.state.runs.find(run => this.speakerSourceReady(run) && !run.speakerJob && !run.speakerError && !run.error);
           if (next) await this.retrySpeakers(next);
         }
       }

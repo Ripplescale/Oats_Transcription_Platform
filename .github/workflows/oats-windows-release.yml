@@ -16,7 +16,8 @@ concurrency:
 
 jobs:
   windows-release:
-    if: github.repository == 'Ripplescale/Hinglish-Transcription-Platform' && vars.OATS_RELEASES_ENABLED == 'true'
+    # The repository ID survives renames; forks cannot publish this release.
+    if: github.repository_id == '1398488057' && vars.OATS_RELEASES_ENABLED == 'true'
     runs-on: windows-2022
     timeout-minutes: 120
     permissions:

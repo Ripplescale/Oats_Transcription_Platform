@@ -42,7 +42,7 @@ test('same-count context recovery revision reimports the selected text and survi
 function fixture(previous) {
   const calls = [], imports = [], stops = [], jobs = new Map(), speakers = new Map(), meetings = new Map(), bindings = new Map();
   const importFailures = new Set(), startFailures = new Set();
-  let nextJob = 0, nextSpeaker = 0, stopFailures = 0, speakersEnabled = false, startGate;
+  let nextJob = 0, nextSpeaker = 0, stopFailures = 0, speakersEnabled = false, startGate, speakerStartGate;
   const dependencies = {
     invoke: async (command, args = {}) => {
       calls.push({ command, args: clone(args) });
@@ -85,7 +85,9 @@ function fixture(previous) {
       if (command === 'get_speaker_setup_status') return { available: speakersEnabled, enabled: speakersEnabled };
       if (command === 'start_speaker_identification') {
         const job = { job_id: `speaker-${++nextSpeaker}`, state: 'diarizing', transcriptionJobId: args.transcriptionJobId };
-        speakers.set(job.job_id, job); return clone(job);
+        speakers.set(job.job_id, job);
+        if (speakerStartGate) await speakerStartGate;
+        return clone(job);
       }
       if (command === 'get_speaker_job_status') return clone(speakers.get(args.jobId));
       if (command === 'retry_speaker_identification') { speakers.get(args.jobId).state = 'diarizing'; return clone(speakers.get(args.jobId)); }
@@ -113,6 +115,7 @@ function fixture(previous) {
     failStart: (role, fail = true) => fail ? startFailures.add(role) : startFailures.delete(role), failStops: count => { stopFailures = count; },
     enableSpeakers: () => { speakersEnabled = true; result.workflow.state.speakerSetup = undefined; },
     gateStarts: promise => { startGate = promise; },
+    gateSpeakerStarts: promise => { speakerStartGate = promise; },
     reload: () => {
       const saved = clone(result.workflow.state);
       for (const run of saved.runs) if (run.job) delete run.job.segments;
@@ -121,6 +124,29 @@ function fixture(previous) {
   };
   return result;
 }
+test('an exited job with an unreadable checkpoint does not block the next saved recording', async () => {
+  const f = fixture();
+  await f.workflow.captureStarted(capture);
+  await f.workflow.captureStopped(capture);
+  await f.workflow.captureStarted(second);
+  await f.workflow.captureStopped(second);
+  assert.equal(f.count('start_local_transcription'), 1);
+  const old = f.live();
+  // Reload removes checkpoint text, as the real provider does. Native status
+  // reports the verified worker exit without inventing replacement segments.
+  delete f.jobs.get(old.job.job_id).segments;
+  f.status(old, { state: 'failed', checkpoint_unreadable: true,
+    error: 'The saved progress file is unreadable. Audio is retained.' });
+  const importsBefore = f.count('import_local_transcription');
+  f.reload();
+  await f.workflow.refreshAfterReload(null);
+  assert.equal(f.live().job.state, 'failed');
+  assert.equal(f.live(second).job.state, 'running');
+  assert.equal(f.count('start_local_transcription'), 2);
+  assert.equal(f.count('import_local_transcription'), importsBefore,
+    'an unreadable checkpoint cannot replace an existing transcript');
+});
+
 async function finishDraft(f, values = {}) {
   f.status(f.draft(), { state: 'stopped', ...values }); await f.workflow.tick();
 }
@@ -487,6 +513,178 @@ test('speaker processing waits for recording to end and the completed primary to
   f.status(f.live(), { state: 'complete', segments: [segment()] }); await f.workflow.tick();
   assert.equal(f.count('start_speaker_identification'), 0); await f.workflow.captureStopped(capture);
   assert.equal(f.count('start_speaker_identification'), 1);
+});
+
+test('a previous call speaker job overlaps the next live transcript and queues the next speakers', async () => {
+  const f = fixture(); f.enableSpeakers();
+  await f.workflow.captureStarted(capture); await f.workflow.captureStopped(capture);
+  f.status(f.live(), { state: 'complete', segments: [segment('first-final')] }); await f.workflow.tick();
+  const firstSpeaker = f.live().speakerJob.job_id;
+  await f.workflow.captureStarted(second);
+  assert.ok(f.live(second).job, 'Trelis starts before the second call stops');
+  assert.equal(f.live(second).recording, true);
+  assert.equal(f.live().speakerJob.state, 'diarizing');
+  f.status(f.live(second), { segments: [segment('second-progress', 'A separate fictional call.')] });
+  f.speakers.get(firstSpeaker).state = 'matching'; await f.workflow.tick();
+  assert.equal(f.live(second).importedCount, 1);
+  assert.equal(f.live().speakerJob.state, 'matching');
+  assert.equal(f.live(second).speakerJob, undefined);
+  await f.workflow.captureStopped(second);
+  f.status(f.live(second), { state: 'complete' }); await f.workflow.tick();
+  assert.equal(f.count('start_speaker_identification'), 1, 'the second speaker job waits for its own slot');
+  f.speakers.get(firstSpeaker).state = 'complete'; await f.workflow.tick();
+  assert.equal(f.count('start_speaker_identification'), 2);
+  assert.equal(f.speakers.get(f.live(second).speakerJob.job_id).transcriptionJobId, f.live(second).job.job_id);
+  assert.equal(f.count('start_local_transcription'), 2);
+  assert.equal(f.count('stop_local_transcription'), 0);
+});
+
+test('a completed previous call can start speakers while another transcription is already running', async () => {
+  const f = fixture(); await f.workflow.captureStarted(capture); await f.workflow.captureStopped(capture);
+  f.status(f.live(), { state: 'complete', segments: [segment('first-final')] }); await f.workflow.tick();
+  await f.workflow.captureStarted(second); assert.equal(f.live(second).job.state, 'running');
+  f.enableSpeakers(); await f.workflow.tick();
+  assert.ok(f.live().speakerJob);
+  assert.equal(f.live(second).job.state, 'running');
+  assert.equal(f.live(second).speakerJob, undefined);
+});
+
+test('two transcription jobs remain serialized while the separate speaker slot is occupied', async () => {
+  const f = fixture(); f.enableSpeakers(); await f.workflow.captureStarted(capture); await f.workflow.captureStopped(capture);
+  f.status(f.live(), { state: 'complete' }); await f.workflow.tick();
+  await f.workflow.captureStarted(second); await f.workflow.captureStarted(third);
+  assert.ok(f.live(second).job); assert.equal(f.live(third).job, undefined);
+  await f.workflow.captureStopped(second);
+  assert.equal(f.live(third).job, undefined, 'capture stop does not free a draining transcription');
+  f.status(f.live(second), { state: 'complete' }); await f.workflow.tick();
+  assert.ok(f.live(third).job); assert.equal(f.live(third).recording, true);
+  assert.equal(f.count('start_local_transcription'), 3);
+  assert.equal(f.count('start_speaker_identification'), 1);
+});
+
+test('reload retains both jobs and explicit Trelis retry proceeds beside the earlier speakers', async () => {
+  const f = fixture(); f.enableSpeakers(); await f.workflow.captureStarted(capture); await f.workflow.captureStopped(capture);
+  f.status(f.live(), { state: 'complete', segments: [segment('first-final')] }); await f.workflow.tick();
+  await f.workflow.captureStarted(second);
+  const asrId = f.live(second).job.job_id, speakerId = f.live().speakerJob.job_id;
+  f.status(f.live(second), { state: 'failed', segments: [segment('second-checkpoint')], segments_revision: 1 }); await f.workflow.tick();
+  f.reload(); await f.workflow.refreshAfterReload(second);
+  assert.equal(f.live(second).job.job_id, asrId); assert.equal(f.live().speakerJob.job_id, speakerId);
+  assert.equal(f.count('resume_local_transcription'), 0, 'reload does not silently retry a failed ASR job');
+  await f.workflow.retry(f.live(second));
+  assert.equal(f.count('resume_local_transcription'), 1);
+  assert.equal(f.live(second).job.job_id, asrId); assert.equal(f.live(second).job.state, 'running');
+  assert.equal(f.live(second).job.segments[0].id, 'second-checkpoint');
+  assert.equal(f.live().speakerJob.job_id, speakerId); assert.equal(f.live().speakerJob.state, 'diarizing');
+  assert.equal(f.count('start_speaker_identification'), 1);
+  assert.equal(f.count('start_local_transcription'), 2);
+});
+
+test('manual speaker retry requires stopped capture and the fully imported completed source', async () => {
+  const f = fixture(); f.enableSpeakers(); await f.workflow.captureStarted(capture);
+  await f.workflow.retrySpeakers(f.live()); assert.equal(f.count('start_speaker_identification'), 0);
+  f.status(f.live(), { state: 'complete', segments: [segment('before-stop')], segments_revision: 1 }); await f.workflow.tick();
+  await f.workflow.retrySpeakers(f.live()); assert.equal(f.count('start_speaker_identification'), 0);
+  // Hydrate a newer completed checkpoint while the earlier import pointer is still retained.
+  const updated = { segments: [segment('changed-source')], segments_revision: 2 };
+  f.status(f.live(), updated); Object.assign(f.live().job, clone(updated)); f.failImport(f.live());
+  await f.workflow.captureStopped(capture); await f.workflow.retrySpeakers(f.live());
+  assert.equal(f.count('start_speaker_identification'), 0, 'an earlier complete import cannot authorize changed source text');
+  f.failImport(f.live(), false); await f.workflow.tick();
+  assert.equal(f.count('start_speaker_identification'), 1);
+  assert.equal(f.live().importedRevision, 2);
+});
+
+test('one shared launch gate prevents duplicate speaker starts and defers ASR only until launch returns', async () => {
+  const f = fixture(); f.enableSpeakers(); await f.workflow.captureStarted(capture);
+  f.status(f.live(), { state: 'complete' });
+  let release; f.gateSpeakerStarts(new Promise(resolve => { release = resolve; }));
+  const stopped = f.workflow.captureStopped(capture);
+  for (let i = 0; i < 60 && !f.count('start_speaker_identification'); i++) await Promise.resolve();
+  assert.equal(f.count('start_speaker_identification'), 1);
+  await Promise.all([f.workflow.captureStarted(second), f.workflow.retrySpeakers(f.live()), f.workflow.tick()]);
+  assert.equal(f.count('start_local_transcription'), 1, 'ASR launch waits for the shared launch gate');
+  assert.equal(f.count('start_speaker_identification'), 1);
+  release(); await stopped; f.gateSpeakerStarts(undefined); await f.workflow.tick();
+  assert.ok(f.live(second).job); assert.equal(f.live(second).recording, true);
+  assert.equal(f.count('start_local_transcription'), 2); assert.equal(f.count('start_speaker_identification'), 1);
+});
+
+test('duplicate capture events cannot launch two ASR jobs while earlier speakers run', async () => {
+  const f = fixture(); f.enableSpeakers(); await f.workflow.captureStarted(capture); await f.workflow.captureStopped(capture);
+  f.status(f.live(), { state: 'complete' }); await f.workflow.tick();
+  let release; f.gateStarts(new Promise(resolve => { release = resolve; }));
+  const started = f.workflow.captureStarted(second);
+  for (let i = 0; i < 60 && f.count('start_local_transcription') < 2; i++) await Promise.resolve();
+  assert.equal(f.count('start_local_transcription'), 2);
+  await Promise.all([f.workflow.captureStarted(second), f.workflow.captureStarted(third), f.workflow.tick()]);
+  assert.equal(f.count('start_local_transcription'), 2);
+  release(); await started; f.gateStarts(undefined); await f.workflow.tick();
+  assert.ok(f.live(second).job); assert.equal(f.live(third).job, undefined);
+  assert.equal(f.count('start_speaker_identification'), 1);
+});
+
+test('failed speakers retry explicitly beside ASR and never occupy a second speaker slot', async () => {
+  const f = fixture(); f.enableSpeakers(); await f.workflow.captureStarted(capture); await f.workflow.captureStopped(capture);
+  f.status(f.live(), { state: 'complete' }); await f.workflow.tick();
+  const speakerId = f.live().speakerJob.job_id;
+  f.speakers.get(speakerId).state = 'failed'; await f.workflow.tick();
+  await f.workflow.captureStarted(second); await f.workflow.retrySpeakers(f.live());
+  assert.equal(f.count('retry_speaker_identification'), 1);
+  assert.equal(f.live().speakerJob.job_id, speakerId); assert.equal(f.live(second).job.state, 'running');
+  await f.workflow.captureStopped(second); f.status(f.live(second), { state: 'complete' }); await f.workflow.tick();
+  await f.workflow.retrySpeakers(f.live(second));
+  assert.equal(f.count('start_speaker_identification'), 1, 'manual and automatic starts share the occupied speaker slot');
+  f.speakers.get(speakerId).state = 'complete'; await f.workflow.tick();
+  assert.equal(f.count('start_speaker_identification'), 2);
+});
+
+test('rendered ASR retry and rerun controls ignore active speakers but respect another transcription', async () => {
+  const React = require('react');
+  const { renderToStaticMarkup } = require('react-dom/server');
+  const panelSource = fs.readFileSync(path.join(__dirname, '../../src/components/LocalTranscriptionPanel.tsx'), 'utf8');
+  const panelCompiled = ts.transpileModule(panelSource, { compilerOptions: {
+    target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX,
+  } });
+  const f = fixture(); f.enableSpeakers(); await f.workflow.captureStarted(capture); await f.workflow.captureStopped(capture);
+  f.status(f.live(), { state: 'complete' }); await f.workflow.tick();
+  await f.workflow.captureStarted(second); await f.workflow.captureStopped(second);
+  f.status(f.live(second), { state: 'failed' }); await f.workflow.tick();
+  const props = { sessionDir: second.session_dir, meetingId: f.live(second).meetingId };
+  const render = () => {
+    let hook = 0;
+    const panel = { exports: {}, require: id => {
+      if (id === 'react') return { ...React, useEffect: () => {}, useState: initial => [
+        hook++ === 0 ? [{ id: 'trelis-10', available: true }] : initial, () => {},
+      ] };
+      if (id === '@tauri-apps/api/core') return { invoke: () => { throw new Error('render must not invoke native commands'); } };
+      if (id === 'next/navigation') return { useRouter: () => ({ push: () => {} }) };
+      if (id === '@/components/ui/button') return { Button: buttonProps => React.createElement('button', buttonProps) };
+      if (id === '@/contexts/LocalWorkflowContext') return { useLocalWorkflow: () => ({ state: f.workflow.state, workflow: f.workflow }) };
+      if (id === '@/contexts/RecordingStateContext') return { useRecordingState: () => ({ isRecording: false }) };
+      if (id === '@/lib/local-transcription-workflow') return context.exports;
+      return require(id);
+    } };
+    vm.runInNewContext(panelCompiled.outputText, panel);
+    return renderToStaticMarkup(React.createElement(panel.exports.LocalTranscriptionPanel, props));
+  };
+  const enabled = (html, label) => {
+    const match = html.match(new RegExp(`<button\\b[^>]*>${label}</button>`));
+    assert.ok(match, `missing rendered ${label} control`);
+    return !/\bdisabled=/.test(match[0]);
+  };
+  let html = render();
+  assert.equal(enabled(html, 'Retry Trelis'), true);
+  assert.equal(enabled(html, 'Create another version'), true);
+  const pending = f.live(second).job; delete f.live(second).job;
+  html = render(); assert.match(html, /Audio is saved\. Preparing transcription\./);
+  f.live(second).job = pending;
+  await f.workflow.captureStarted(third);
+  html = render(); assert.equal(enabled(html, 'Retry Trelis'), false);
+  assert.equal(enabled(html, 'Create another version'), false);
+  delete f.live(second).job;
+  assert.match(render(), /Waiting for another transcription to finish/);
+  f.live(second).job = pending;
 });
 
 test('adopting a durable fallback cannot bind it as the primary transcript', async () => {

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { prepareStage, createFeed, validateManifest, verifySignedInstaller, versionName } = require('./windows-update-feed.cjs');
+const { REPOSITORY, DOWNLOAD_REPOSITORY, prepareStage, createFeed, validateManifest, verifySignedInstaller, versionName } = require('./windows-update-feed.cjs');
 const root = path.resolve(__dirname, '..');
 const fixtures = path.join(root, 'target', 'update-feed-tests');
 fs.mkdirSync(fixtures, { recursive: true });
@@ -41,6 +41,9 @@ test('creates a verified Windows feed and refuses replacing release metadata', (
   assert.equal(summary.bytes, f.installer.length);
   assert.equal(manifest.notes, 'Synthetic signed release. हिंदी');
   assert.equal(manifest.platforms['windows-x86_64'].signature, f.signature);
+  assert.equal(REPOSITORY, 'Ripplescale/Oats_Transcription_Platform');
+  assert.equal(DOWNLOAD_REPOSITORY, 'Ripplescale/Hinglish-Transcription-Platform');
+  assert.equal(manifest.platforms['windows-x86_64'].url, 'https://github.com/Ripplescale/Hinglish-Transcription-Platform/releases/download/v0.8.3/oats_0.8.3_x64-setup.exe');
   assert.deepEqual(validateManifest(manifest, f.filename, f.publicKey), summary);
   assert.throws(() => createFeed('0.8.3', f.filename, f.key, f.notes, f.dir), /replace/);
 });

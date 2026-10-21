@@ -1,6 +1,26 @@
 # Signed Windows updates
 
-oats checks the public `Ripplescale/Hinglish-Transcription-Platform` GitHub release feed after startup and roughly once a day while open. About → Check for updates checks immediately. Checks fetch release metadata only. A notification offers details; **Download update** explicitly downloads and verifies the installer; **Install now** is a separate action. The app does not install on startup or automatically restart during work.
+## Normal release process
+
+Publishing an app update means publishing a complete signed GitHub Release,
+not just pushing source. Commit the reviewed changes and release notes, use a
+stable version higher than installed and published versions, then push its
+matching `vX.Y.Z` tag. The Windows workflow runs regression checks, builds and
+signs the installer, verifies the feed, uploads all assets to a draft, and makes
+the complete release latest. Verify the public feed and signed bytes before
+reporting that the update is available. Ordinary branch pushes remain development
+work; they do not distribute an installer. Installing locally is a separate user
+action and is not part of publishing.
+
+The repository is now `Ripplescale/Oats_Transcription_Platform`. The workflow is
+bound to repository ID `1398488057`, so another rename does not disable releases.
+Existing 0.8.3–0.8.5 clients accept only the previous repository's download path.
+The shared feed keeps that redirected asset URL for compatibility; new clients
+accept both names for the same signed installer and check the current feed URL.
+Keep the same signing identity. GitHub Actions stores its encrypted key and
+password as separate encrypted repository secrets, not in source or logs.
+
+oats checks the public `Ripplescale/Oats_Transcription_Platform` GitHub release feed after startup and roughly once a day while open. About → Check for updates checks immediately. Checks fetch release metadata only. A notification offers details; **Download update** explicitly downloads and verifies the installer; **Install now** is a separate action. The app does not install on startup or automatically restart during work.
 
 Installation flushes mounted note/title editors and refuses unresolved draft journals, pending transcript corrections, reference entries or edited earlier summaries. Reviewed forms must be explicitly saved, applied or cancelled. The modal blocks new editor interaction during handoff. Native code checks meeting capture, dictation, retained dictation text, local transcription/speaker work and recording storage again, under an interlock that also blocks new work from starting. Copy or save a pending dictation result and dismiss its popup before installing. Busy or failed installation retains the staged package for retry. Staging is memory-only and is lost when oats closes. Successful Windows installer handoff closes the app; the installer controls its return.
 
@@ -15,11 +35,11 @@ A source commit or GitHub push is not an app update. Publish a reviewed **stable
 - `latest.json`
 - `SHA256SUMS.txt` and `SOURCE-COMMIT.txt` for review
 
-The fixed feed is `https://github.com/Ripplescale/Hinglish-Transcription-Platform/releases/latest/download/latest.json`. Its `windows-x86_64` entry points to that tag's exact installer and contains the signature text, not a signature URL. New versions must exceed the installed version. Draft or prerelease uploads do not become the stable latest feed. Before the first signed release is published, this endpoint may return HTTP 404; a configured app cannot offer an update from an empty feed.
+The current feed is `https://github.com/Ripplescale/Oats_Transcription_Platform/releases/latest/download/latest.json`; the previous repository name redirects there for older clients. Its `windows-x86_64` entry points to that tag's exact installer and contains the signature text, not a signature URL. New versions must exceed the installed version. Draft or prerelease uploads do not become the stable latest feed. Before the first signed release is published, this endpoint may return HTTP 404; a configured app cannot offer an update from an empty feed.
 
 The old `.github/workflows/*.disabled`, `scripts/generate-update-manifest-github.js` and local updater demo retain upstream assumptions. They are not this release path and must not be enabled unchanged. The new packaging script does not push, create a tag, upload files, publish a release or install anything.
 
-The new `.github/workflows/oats-windows-release.yml` intentionally publishes on **stable `vX.Y.Z` tag pushes only**, after one-time setup. Ordinary branch pushes do not publish. It is gated by repository variable `OATS_RELEASES_ENABLED=true` and the exact repository identity. Set repository variable `OATS_UPDATER_PUBLIC_KEY` to the public `.pub` contents, and secrets `OATS_UPDATER_PRIVATE_KEY` / `OATS_UPDATER_PRIVATE_KEY_PASSWORD` to the protected signing credentials. Merge the reviewed workflow and source, supply those values, enable the variable, and push a reviewed version tag with matching committed release notes. No extra per-release approval is introduced; the deliberate tag is the publishing trigger, subject to any existing repository protections.
+The new `.github/workflows/oats-windows-release.yml` intentionally publishes on **stable `vX.Y.Z` tag pushes only**, after one-time setup. Ordinary branch pushes do not publish. It is gated by repository variable `OATS_RELEASES_ENABLED=true` and the stable repository ID. Set repository variable `OATS_UPDATER_PUBLIC_KEY` to the public `.pub` contents, and secrets `OATS_UPDATER_PRIVATE_KEY` / `OATS_UPDATER_PRIVATE_KEY_PASSWORD` to the protected signing credentials. Merge the reviewed workflow and source, supply those values, enable the variable, and push a reviewed version tag with matching committed release notes. No extra per-release approval is introduced; the deliberate tag is the publishing trigger, subject to any existing repository protections.
 
 CI uses Windows 2022, verified official GitHub Actions revisions, pnpm 9.15.9, a Rust MSVC toolchain, the runner's Microsoft C++ Build Tools, and a pinned SHA-256-checked public libclang wheel. The same packaging helper supplies Microsoft CRT and stages native build dependencies. It uploads every verified file to a draft before making it the latest release. Failed uploads remain unpublished, and existing releases are not overwritten automatically. The first complete public CI run and installer smoke test remain release qualification steps; source validation alone does not establish end-to-end publication and installation.
 

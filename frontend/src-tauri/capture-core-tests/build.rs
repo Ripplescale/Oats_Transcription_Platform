@@ -27,6 +27,26 @@ fn main() {
     let parsed = syn::parse_file(&fs::read_to_string(transcription).unwrap()).unwrap();
     let lifecycle = parsed.items.iter().find(|item| matches!(item, syn::Item::Fn(function) if function.sig.ident == "project_worker_lifecycle")).unwrap();
     fs::write(PathBuf::from(env::var("OUT_DIR").unwrap()).join("worker_lifecycle.rs"), quote!(#lifecycle).to_string()).unwrap();
+    let activity = parsed.items.iter().find(|item| matches!(item, syn::Item::Fn(function) if function.sig.ident == "worker_activity")).unwrap();
+    fs::write(PathBuf::from(env::var("OUT_DIR").unwrap()).join("worker_activity.rs"), quote!(#activity).to_string()).unwrap();
+    let checkpoint_helpers: Vec<_> = parsed.items.iter().filter(|item| matches!(item,
+        syn::Item::Fn(function) if ["read", "read_transcription_checkpoint", "project_transcription_checkpoint",
+            "project_request_metadata", "project_worker_lifecycle", "require_readable_transcription_checkpoint"
+        ].contains(&function.sig.ident.to_string().as_str())
+    )).collect();
+    assert_eq!(checkpoint_helpers.len(), 6, "Checkpoint recovery helpers must be extracted from production source");
+    let checkpoint_tests: Vec<_> = parsed.items.iter().filter_map(|item| match item {
+        syn::Item::Mod(module) if module.ident == "tests" => module.content.as_ref().map(|(_, items)| items),
+        _ => None,
+    }).flatten().filter(|item| matches!(item,
+        syn::Item::Fn(function) if ["unreadable_checkpoint_is_failed_only_after_worker_exit_and_never_rewritten",
+            "valid_checkpoint_keeps_segments_revision_and_live_teardown_gate",
+            "malformed_checkpoint_shape_is_inspectable_instead_of_panicking",
+            "absent_checkpoint_keeps_new_worker_startup_and_interrupted_resume_behavior"
+        ].contains(&function.sig.ident.to_string().as_str())
+    )).collect();
+    assert_eq!(checkpoint_tests.len(), 4, "Checkpoint recovery assertions must stay linked to production tests");
+    fs::write(PathBuf::from(env::var("OUT_DIR").unwrap()).join("transcription_checkpoints.rs"), quote!(#(#checkpoint_helpers)* #(#checkpoint_tests)*).to_string()).unwrap();
     let helpers: Vec<_> = parsed.items.iter().filter(|item| matches!(item,
         syn::Item::Fn(function) if ["read", "capture_ready_for_final", "validate_workflow_role", "profile_parts", "validate_final_profile", "local_stt_profiles", "project_request_metadata",
             "runtime_registry", "registry_supports_profile", "require_runtime_profile"

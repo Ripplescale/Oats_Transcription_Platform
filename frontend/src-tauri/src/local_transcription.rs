@@ -5,7 +5,12 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use crate::{local_workspace::{data_root, valid_id}, state::AppState};
 
-static CHILDREN: Lazy<Mutex<HashMap<String, Child>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+#[path = "local_worker_policy.rs"]
+mod worker_policy;
+use worker_policy::{WorkerActivity, WorkerKind};
+
+type WorkerChildren = HashMap<(WorkerKind, String), Child>;
+static CHILDREN: Lazy<Mutex<WorkerChildren>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static JOB_START_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static RETENTION_JOBS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static RETENTION_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -36,9 +41,7 @@ fn schedule_completed_retention(id: String, session: String, speaker: bool) {
             let Ok(_capture) = crate::audio::recording_commands::CAPTURE_START_LOCK.try_lock() else { return Ok(false); };
             if crate::audio::recording_commands::capture_in_progress() || crate::dictation::is_busy() { return Ok(false); }
             let Ok(mut children) = CHILDREN.try_lock() else { return Ok(false); };
-            for child in children.values_mut() {
-                if child.try_wait().map_err(|e|e.to_string())?.is_none() { return Ok(false); }
-            }
+            if worker_activity(&mut children).map_err(|e|e.to_string())?.any_live() { return Ok(false); }
             RETENTION_BUSY.store(true, std::sync::atomic::Ordering::SeqCst);
             let _reservation = RetentionReservation;
             drop(children); // Status reads remain responsive during archive I/O.
@@ -199,7 +202,7 @@ pub async fn ensure_capture_meeting(state: tauri::State<'_,AppState>, session_di
 fn launch(id: &str) -> Result<(), String> {
     let dir = job_dir(id)?;
     let snapshot = ensure_job_runtime_snapshot(&dir, &config_path()?)?;
-    launch_process(id, &snapshot, &dir)
+    launch_process(WorkerKind::Transcription, id, &snapshot, &dir)
 }
 
 fn validate_asr_runtime(config: &Value) -> Result<(), String> {
@@ -260,19 +263,30 @@ fn ensure_job_runtime_snapshot(dir: &Path, current_config: &Path) -> Result<Path
     Ok(snapshot)
 }
 
-fn launch_process(id: &str, config_file: &Path, dir: &Path) -> Result<(),String> {
+fn worker_activity(children: &mut WorkerChildren) -> Result<WorkerActivity, std::io::Error> {
+    let mut activity = WorkerActivity::default();
+    for ((kind, _), child) in children.iter_mut() {
+        activity.observe_exit(*kind, child.try_wait()?.is_some());
+    }
+    Ok(activity)
+}
+
+fn launch_process(kind: WorkerKind, id: &str, config_file: &Path, dir: &Path) -> Result<(),String> {
     let _update_start = crate::updates::start_lease()?;
     let mut children = CHILDREN.lock().map_err(|e| e.to_string())?;
     if RETENTION_BUSY.load(std::sync::atomic::Ordering::SeqCst) { return Err("Finishing recording storage cleanup. Try again in a moment.".into()); }
     if crate::dictation::is_busy() { return Err("Finish or cancel dictation before starting local transcription.".into()); }
-    let mut active = false;
-    for child in children.values_mut() { if child.try_wait().map_err(|e| e.to_string())?.is_none() { active = true; } }
-    if active { return Err("One local transcription job is already running. Finish or stop it before starting another version.".into()); }
+    if !worker_activity(&mut children).map_err(|e|e.to_string())?.admits(kind) {
+        return Err(match kind {
+            WorkerKind::Transcription => "A transcription job is already running. Finish or stop it before starting another transcript.",
+            WorkerKind::Speaker => "Speaker labeling is already running. Wait for it to finish before starting another speaker job.",
+        }.into());
+    }
     crate::dictation::release_idle_model();
     // Jobs keep their immutable original Python worker. Restore the exact
     // committed WAV bytes so even workers predating archive support can resume.
     let request = read(&dir.join("request.json"))?;
-    if dir.parent().and_then(Path::file_name).and_then(|s|s.to_str()) == Some("jobs") {
+    if kind == WorkerKind::Transcription {
         let session = request["session_dir"].as_str().ok_or("Missing source session")?;
         let (session, _) = capture_session(session)?;
         crate::audio::source_archive::restore(&session).map_err(|e|e.to_string())?;
@@ -287,9 +301,9 @@ fn launch_process(id: &str, config_file: &Path, dir: &Path) -> Result<(),String>
         .env("HF_HUB_OFFLINE","1").env("TRANSFORMERS_OFFLINE","1").env("HF_HUB_DISABLE_TELEMETRY","1").env("DO_NOT_TRACK","1")
         .env("STTAPP_PARENT_PID",std::process::id().to_string());
     #[cfg(target_os="windows")]
-    { use std::os::windows::process::CommandExt; command.creation_flags(0x08000000); }
+    { use std::os::windows::process::CommandExt; command.creation_flags(worker_policy::windows_creation_flags(kind)); }
     let child = command.spawn().map_err(|e| format!("Local worker could not start: {e}"))?;
-    children.insert(id.into(), child);
+    children.insert((kind, id.into()), child);
     Ok(())
 }
 
@@ -297,10 +311,8 @@ fn launch_process(id: &str, config_file: &Path, dir: &Path) -> Result<(),String>
 /// child, so a meeting job cannot race a dictation model into memory.
 pub(crate) fn reserve_for_dictation() -> Result<(), String> {
     let mut children = CHILDREN.lock().map_err(|e| e.to_string())?;
-    for child in children.values_mut() {
-        if child.try_wait().map_err(|e| e.to_string())?.is_none() {
-            return Err("Wait for local transcription to finish before starting dictation.".into());
-        }
+    if worker_activity(&mut children).map_err(|e|e.to_string())?.any_live() {
+        return Err("Wait for transcription and speaker labeling to finish before starting dictation.".into());
     }
     crate::dictation::try_claim()
 }
@@ -310,10 +322,8 @@ pub(crate) fn reserve_for_dictation() -> Result<(), String> {
 pub(crate) fn update_work_active() -> Result<bool, String> {
     if RETENTION_BUSY.load(std::sync::atomic::Ordering::SeqCst) { return Ok(true); }
     let mut children = CHILDREN.try_lock().map_err(|_| "Local speech work is changing. Try installing again when it finishes.".to_owned())?;
-    for child in children.values_mut() {
-        if child.try_wait().map_err(|_| "Could not verify that local speech work has stopped.".to_owned())?.is_none() { return Ok(true); }
-    }
-    Ok(false)
+    worker_activity(&mut children).map(|activity| activity.any_live())
+        .map_err(|_| "Could not verify that local speech work has stopped.".to_owned())
 }
 
 /// The caller holds CAPTURE_START_LOCK. Keep background model preparation under
@@ -323,10 +333,8 @@ pub(crate) fn prepare_idle_dictation(prepare: impl FnOnce() -> Result<(), String
     let _update_start = crate::updates::start_lease()?;
     let mut children = CHILDREN.try_lock().map_err(|_| "Local speech work is busy.".to_owned())?;
     if crate::dictation::is_busy() { return Err("Dictation is already active.".into()); }
-    for child in children.values_mut() {
-        if child.try_wait().map_err(|e| e.to_string())?.is_none() {
-            return Err("Local transcription is already active.".into());
-        }
+    if worker_activity(&mut children).map_err(|e|e.to_string())?.any_live() {
+        return Err("Local transcription or speaker labeling is already active.".into());
     }
     prepare()
 }
@@ -376,7 +384,7 @@ pub async fn start_speaker_identification(state: tauri::State<'_,AppState>, tran
         request["previous_speakers_path"]=json!(snapshot);
     }
     fs::write(dir.join("request.json"),serde_json::to_vec_pretty(&request).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
-    if let Err(error)=launch_process(&id,&data_root()?.join("speaker-runtime.json"),&dir) {
+    if let Err(error)=launch_process(WorkerKind::Speaker,&id,&data_root()?.join("speaker-runtime.json"),&dir) {
         // Keep the request for an explicit retry, with an actionable result.
         fs::write(dir.join("status.json"),serde_json::to_vec_pretty(&json!({"job_id":id,"state":"failed","error":error})).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
     }
@@ -390,7 +398,7 @@ pub fn get_speaker_job_status(job_id: String) -> Result<Value,String> {
     let mut status=if dir.join("status.json").is_file() { read(&dir.join("status.json"))? } else { json!({"job_id":job_id,"state":"running"}) };
     let exited={
         let mut children=CHILDREN.lock().map_err(|e|e.to_string())?;
-        match children.get_mut(&job_id) { Some(child)=>child.try_wait().map_err(|e|e.to_string())?.is_some(),None=>true }
+        match children.get_mut(&(WorkerKind::Speaker,job_id.clone())) { Some(child)=>child.try_wait().map_err(|e|e.to_string())?.is_some(),None=>true }
     };
     if exited && !["complete","failed","stopped"].contains(&status["state"].as_str().unwrap_or("")) {
         status["state"]="failed".into(); status["error"]="Speaker worker stopped. The recording and transcript are preserved; retry when ready.".into();
@@ -415,7 +423,7 @@ pub async fn retry_speaker_identification(job_id: String) -> Result<Value,String
     }
     let status=get_speaker_job_status(job_id.clone())?;
     if !["failed","stopped"].contains(&status["state"].as_str().unwrap_or("")) { return Err("Only interrupted speaker jobs can retry".into()); }
-    launch_process(&job_id,&data_root()?.join("speaker-runtime.json"),&speaker_dir(&job_id)?)?;
+    launch_process(WorkerKind::Speaker,&job_id,&data_root()?.join("speaker-runtime.json"),&speaker_dir(&job_id)?)?;
     Ok(json!({"job_id":job_id,"state":"running"}))
 }
 
@@ -536,21 +544,15 @@ fn find_workflow_job(session: &str, role: &str) -> Result<Option<String>, String
 pub fn get_local_transcription_status(job_id: String) -> Result<Value, String> {
     let dir = job_dir(&job_id)?;
     let request = read(&dir.join("request.json"))?;
-    let mut result = if dir.join("status.json").exists() { read(&dir.join("status.json"))? } else {
-        json!({"job_id":job_id,"session_dir":request["session_dir"],"profile":request["profile"],"state":"running",
-            "processed_audio_seconds":0,"available_audio_seconds":0,"backlog_seconds":0,"segments":[]})
-    };
+    // Keep a damaged old checkpoint inspectable instead of failing the entire
+    // queue restore. Decide its state only after checking the owned process.
+    let checkpoint = read_transcription_checkpoint(&dir);
     let mut children = CHILDREN.lock().map_err(|e| e.to_string())?;
-    let exited = match children.get_mut(&job_id) {
+    let exited = match children.get_mut(&(WorkerKind::Transcription,job_id.clone())) {
         Some(child) => child.try_wait().map_err(|e| e.to_string())?.is_some(),
         None => true,
     };
-    if exited && ["running","waiting_for_audio"].contains(&result["state"].as_str().unwrap_or("")) {
-        result["state"] = "failed".into();
-        result["error"] = "Worker exited or the application restarted. Saved audio and completed results remain available; resume the job.".into();
-    }
-    project_worker_lifecycle(&mut result, exited);
-    project_request_metadata(&mut result, &request);
+    let result = project_transcription_checkpoint(&job_id, &request, checkpoint, exited);
     drop(children);
     if exited && result["state"] == "complete" {
         if let Some(session) = request["session_dir"].as_str() {
@@ -558,6 +560,49 @@ pub fn get_local_transcription_status(job_id: String) -> Result<Value, String> {
         }
     }
     Ok(result)
+}
+
+fn read_transcription_checkpoint(dir: &Path) -> Result<Option<Value>, String> {
+    let path = dir.join("status.json");
+    match fs::metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+        Ok(_) => {},
+    }
+    let status = read(&path)?;
+    if !status.is_object() || !status["segments"].is_array()
+        || !["running", "waiting_for_audio", "complete", "failed", "stopped"].contains(&status["state"].as_str().unwrap_or("")) {
+        return Err("Checkpoint is missing its state or transcript segments".into());
+    }
+    Ok(Some(status))
+}
+
+fn project_transcription_checkpoint(job_id: &str, request: &Value, checkpoint: Result<Option<Value>, String>, exited: bool) -> Value {
+    let mut result = match checkpoint {
+        Ok(Some(status)) => status,
+        Ok(None) => json!({"job_id":job_id,"session_dir":request["session_dir"],"profile":request["profile"],"state":"running",
+            "processed_audio_seconds":0,"available_audio_seconds":0,"backlog_seconds":0,"segments":[]}),
+        Err(error) => {
+            // This is a read-only projection, never a replacement checkpoint.
+            // Omitting segments prevents synthetic empty text from replacing
+            // an earlier imported transcript or its corrections.
+            let message = if exited {
+                "The saved transcript checkpoint could not be read. The recording and previously imported transcript are preserved. Start a new transcript from the recording; this checkpoint cannot resume."
+            } else {
+                "The transcript checkpoint could not be read while its worker is still running. Waiting for the worker to finish; saved audio and previously imported text are preserved."
+            };
+            json!({"job_id":job_id,"session_dir":request["session_dir"],"profile":request["profile"],
+                "state":if exited {"failed"} else {"running"},"checkpoint_unreadable":true,
+                "checkpoint_error":error,"error":message})
+        },
+    };
+    if exited && ["running","waiting_for_audio"].contains(&result["state"].as_str().unwrap_or("")) {
+        result["state"] = "failed".into();
+        result["error"] = "Worker exited or the application restarted. Saved audio and completed results remain available; resume the job.".into();
+    }
+    project_worker_lifecycle(&mut result, exited);
+    project_request_metadata(&mut result, &request);
+    result
 }
 
 fn project_request_metadata(status: &mut Value, request: &Value) {
@@ -598,6 +643,7 @@ pub async fn resume_local_transcription(job_id: String) -> Result<Value, String>
 
 fn resume_local_transcription_inner(job_id: String) -> Result<Value, String> {
     let status = get_local_transcription_status(job_id.clone())?;
+    require_readable_transcription_checkpoint(&status)?;
     if !["failed","stopped"].contains(&status["state"].as_str().unwrap_or("")) { return Err("Only failed or stopped jobs can resume".into()); }
     let stop = job_dir(&job_id)?.join("stop.request");
     if stop.is_file() { fs::remove_file(stop).map_err(|e| e.to_string())?; }
@@ -614,8 +660,16 @@ pub fn list_local_transcription_jobs(session_dir: Option<String>) -> Result<Vec<
         let path = item.map_err(|e| e.to_string())?.path();
         if let Some(id) = path.file_name().and_then(|p| p.to_str()) {
             if path.join("request.json").is_file() {
-                let status = get_local_transcription_status(id.into())?;
-                if session_dir.as_ref().map(|s| status["session_dir"].as_str().map(|p|path_key(p)==path_key(s)).unwrap_or(false)).unwrap_or(true) { jobs.push(status); }
+                // Filter using the request before reading a potentially large
+                // checkpoint, and isolate an unreadable old request to its job.
+                let request = match read(&path.join("request.json")) {
+                    Ok(request) => request,
+                    Err(error) => { log::warn!("Ignoring unreadable old job request at {}: {error}", path.display()); continue; },
+                };
+                if !session_dir.as_ref().map(|s| request["session_dir"].as_str().map(|p|path_key(p)==path_key(s)).unwrap_or(false)).unwrap_or(true) { continue; }
+                // An exit-probe failure must still fail closed rather than
+                // hiding a worker whose resources could remain occupied.
+                jobs.push(get_local_transcription_status(id.into())?);
             }
         }
     }
@@ -773,6 +827,7 @@ async fn preserve_raw(tx:&mut sqlx::Transaction<'_,sqlx::Sqlite>,job:&str,meetin
 /// Pool-only import keeps replacement validation/history/upserts in one SQLite
 /// transaction. Callers publish workspace metadata only after a nonstale import.
 async fn import_status(pool:&sqlx::SqlitePool,job_id:&str,meeting_id:&str,primary:bool,status:&Value) -> Result<Value,String> {
+    require_readable_transcription_checkpoint(status)?;
     valid_id(meeting_id)?;
     let (active,archive,revision,fingerprint)=canonical_windows(job_id,status)?;
     let title: String = sqlx::query_scalar("SELECT title FROM meetings WHERE id = ?").bind(&meeting_id)
@@ -872,6 +927,13 @@ async fn import_status(pool:&sqlx::SqlitePool,job_id:&str,meeting_id:&str,primar
         .execute(&mut *tx).await.map_err(|e|e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(json!({"meeting_id":child_id,"source_meeting_id":source_meeting_id,"imported_count":imported,"removed_count":removed,"stale_snapshot":false,"segments_revision":revision}))
+}
+
+fn require_readable_transcription_checkpoint(status: &Value) -> Result<(), String> {
+    if status["checkpoint_unreadable"] == true {
+        return Err("The transcript checkpoint is unreadable. Saved audio and previously imported text are preserved; start a new transcript from the recording.".into());
+    }
+    Ok(())
 }
 
 pub(crate) async fn correction_source_matches(pool:&sqlx::SqlitePool,meeting:&str,id:&str,original:&str) -> Result<bool,String> {
@@ -1052,6 +1114,75 @@ mod tests {
         assert_eq!(raw_rows(&pool,"meeting-local-job").await.len(),2);
         assert_eq!(import_status(&pool,"job","source",false,&first).await.unwrap()["stale_snapshot"],true);
         assert_eq!(raw_rows(&pool,"meeting-local-job").await.len(),2);
+    }
+
+    #[test]
+    fn unreadable_checkpoint_is_failed_only_after_worker_exit_and_never_rewritten() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = vec![0u8; 4096];
+        fs::write(root.path().join("status.json"), &bytes).unwrap();
+        let request = json!({"session_dir":"saved-recording","profile":"trelis-20","workflow_role":"live-final"});
+        for exited in [false, true] {
+            let status = project_transcription_checkpoint("job", &request, read_transcription_checkpoint(root.path()), exited);
+            assert_eq!(status["state"], if exited {"failed"} else {"running"});
+            assert_eq!(status["checkpoint_unreadable"], true);
+            assert_eq!(status["workflow_role"], "live-final");
+            assert_eq!(status["session_dir"], "saved-recording");
+            assert!(status.get("segments").is_none());
+            assert!(status["checkpoint_error"].as_str().unwrap().contains("expected value"));
+            assert!(require_readable_transcription_checkpoint(&status).is_err());
+            // Even a frontend cache merge cannot make this projection importable.
+            let mut cached = status.clone();
+            cached["segments"] = json!([{"text":"previous valid text"}]);
+            assert!(require_readable_transcription_checkpoint(&cached).is_err());
+            assert_eq!(fs::read(root.path().join("status.json")).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn valid_checkpoint_keeps_segments_revision_and_live_teardown_gate() {
+        let root = tempfile::tempdir().unwrap();
+        let checkpoint = json!({"job_id":"job","state":"complete","segments":[{"text":"preserved"}],
+            "superseded_segments":[{"text":"earlier"}],"segments_revision":12,"identity_sha256":"original-identity"});
+        let bytes = serde_json::to_vec(&checkpoint).unwrap();
+        fs::write(root.path().join("status.json"), &bytes).unwrap();
+        let request = json!({"workflow_role":"live-final","final_profile":"trelis-10"});
+        for exited in [false, true] {
+            let status = project_transcription_checkpoint("job", &request, read_transcription_checkpoint(root.path()), exited);
+            assert_eq!(status["state"], if exited {"complete"} else {"running"});
+            assert_eq!(status["segments"], checkpoint["segments"]);
+            assert_eq!(status["superseded_segments"], checkpoint["superseded_segments"]);
+            assert_eq!(status["segments_revision"], 12);
+            assert_eq!(status["identity_sha256"], "original-identity");
+            assert_eq!(status["final_profile"], "trelis-10");
+            assert!(require_readable_transcription_checkpoint(&status).is_ok());
+        }
+        assert_eq!(fs::read(root.path().join("status.json")).unwrap(), bytes);
+    }
+
+    #[test]
+    fn malformed_checkpoint_shape_is_inspectable_instead_of_panicking() {
+        let root = tempfile::tempdir().unwrap();
+        for checkpoint in [json!(null), json!([]), json!({"state":"complete"}),
+            json!({"state":"unknown","segments":[]})] {
+            fs::write(root.path().join("status.json"), serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+            let status = project_transcription_checkpoint("job", &json!({}), read_transcription_checkpoint(root.path()), true);
+            assert_eq!(status["state"], "failed");
+            assert_eq!(status["checkpoint_unreadable"], true);
+            assert!(status.get("segments").is_none());
+        }
+    }
+
+    #[test]
+    fn absent_checkpoint_keeps_new_worker_startup_and_interrupted_resume_behavior() {
+        let root = tempfile::tempdir().unwrap();
+        for exited in [false, true] {
+            let status = project_transcription_checkpoint("job", &json!({}), read_transcription_checkpoint(root.path()), exited);
+            assert_eq!(status["state"], if exited {"failed"} else {"running"});
+            assert!(status.get("checkpoint_unreadable").is_none());
+            assert_eq!(status["segments"], json!([]));
+            assert!(require_readable_transcription_checkpoint(&status).is_ok());
+        }
     }
 
     fn synthetic_asr_runtime(root: &Path, label: &str) -> Value {

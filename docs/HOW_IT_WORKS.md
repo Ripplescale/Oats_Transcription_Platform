@@ -9,7 +9,7 @@ oats keeps audio as the source of truth and treats transcripts as editable inter
 3. **Write while oats listens.** Notes autosave independently. Open the transcript with the microphone/up-arrow control when you want to check it. Computer audio appears in chat bubbles on the left and microphone audio on the right, in the existing transcript order. These labels identify recording sources, not individual speakers; older text without a known source stays neutral. Choose Trelis windows of 5, 10, or 20 seconds; new settings default to 10 seconds. A conservative Silero gate checks each window before local OpenVINO GPU inference and retains uncertain speech. Trelis preserves the original Hindi/English script.
 4. **Stop and finish remaining audio.** Stopping capture lets the same Trelis job drain its backlog and process the final partial window. The display changes from Live transcript to Finishing transcript, then Final transcript on completion. There is no second full pass. “Final” means processing finished, not human verification.
 5. **Recover suspicious output.** Long repeated phrases or a reached generation limit trigger a retry using a neighborhood of up to 30 seconds. While recording, the app waits for the needed following audio and keeps the original text visible as provisional. A clean, nonempty retry replaces its covered range. Any untouched part of a neighboring window is transcribed separately, so the replacement neither duplicates that range nor guesses which words to trim. If that cannot be completed reliably, the app retries the original window in pieces of at most 5 seconds. A completed, nonempty combined fallback becomes the displayed and copied text even if repetition remains. Failed or entirely empty fallbacks retain the original. Every recovery remains marked for review, with originals and attempts preserved.
-6. **Review speakers.** Optional Community-1 runs after recording and transcription complete. Turns are mapped to transcript windows, overlapping candidates remain explicit, and manual names survive reconciliation. Live individual speaker identification remains future work.
+6. **Review speakers.** Optional Community-1 runs after that recording and its transcription complete. Speaker labeling for a finished call can continue while Trelis transcribes your next call. Turns are mapped to transcript windows, overlapping candidates remain explicit, and manual names survive reconciliation. Live individual speaker identification remains future work.
 7. **Keep notes or hand off.** Review the transcript, edit text, name speakers, add notes, and play the related audio. Trelis remains the primary version; an explicitly requested Apex fallback has its own notes and corrections. Export or hand the selected version to Claude yourself.
 
 ```mermaid
@@ -72,6 +72,21 @@ The adapter preserves Trelis's custom mixed-code prefix, greedy decoding, 440-to
 
 A chunk duration is a processing unit, not a guarantee that an update appears immediately when its audio ends. Compute and queueing add delay; loading and compiling the GPU model adds startup time. Separate microphone and system tracks require separate inference requests. A call with two fully processed tracks can cost approximately twice a single-track engine run before retries or speakers are added. Segment times identify source-window boundaries, not validated word-level alignments.
 
+### Transcription and speaker labeling together
+
+The scheduler allows one transcription worker and one CPU speaker-labeling worker
+to run together. A previous call's speaker job therefore does not reserve the
+transcription slot needed by a new recording. A second transcription job waits
+for the first transcription process to exit; a second speaker job waits for the
+first speaker process to exit. Each speaker job still needs its own completed,
+saved transcript before it can start.
+
+On Windows, speaker workers run at below-normal process priority. They still
+share CPU time and memory with transcription, so concurrent operation does not
+guarantee unchanged live latency. Dictation and idle-model preparation retain
+their exclusive speech-work checks. Installation and recording-storage cleanup
+also wait for both types of worker to finish.
+
 The isolated acceleration experiment on an Intel Ultra 7 268V / Arc 140V laptop found:
 
 - **23/23 chunk texts exactly matched** between CPU and OpenVINO FP16 across nine passages totalling 400.15 seconds. The six checked passages contained 816 reference words; this was development data, not a held-out accuracy test.
@@ -90,13 +105,15 @@ Chunk boundaries and decoding can affect omissions and repetition. Language bias
 
 ## Handoff, queueing, and recovery
 
-Only one heavy ASR or speaker worker runs at a time. Stopping capture normally leaves Trelis running until the saved audio is finished. Pausing transcription or choosing Apex fallback is a separate graceful request: the current inference must finish, its output must be saved/imported, and the process must exit before another worker takes the slot. A saved terminal checkpoint alone does not prove that model teardown is finished.
+One transcription worker and one speaker worker can run together. Stopping capture normally leaves Trelis running until the saved audio is finished. Pausing transcription or choosing Apex fallback is a separate graceful request: the current inference must finish, its output must be saved/imported, and the process must exit before another worker of the same type takes its slot. A saved terminal checkpoint alone does not prove that model teardown is finished.
 
 When calls happen back-to-back, capture continues even if an earlier worker is busy. Trelis starts when the slot is available and uses the saved recording, even if the call has already ended. This keeps recording independent of inference without claiming immediate live updates for every queued call.
 
 **Use Apex fallback** is an explicit action. It is available even if Trelis failed before creating a job. Apex replays the saved recording from the beginning into a child version; it does not fill holes in or overwrite the Trelis text. Pausing a worker leaves recording intact. Trelis does not restart automatically after fallback. Pause or finish Apex, then choose Retry Trelis to resume the original Trelis job and retain its existing corrections.
 
 Duplicate events, reloads, and recovery retain job identities instead of creating replacement transcripts. Interrupted captures need recovery before processing resumes. Existing legacy jobs keep their original settings and versions: older Apex Live Draft / Trelis Final pairs still complete their original handoff, and manual versions are not converted into the new workflow.
+
+If an older job's saved progress file cannot be read, oats reports that job as failed after confirming its worker has exited; a running worker keeps its slot. The damaged file, original audio and previously imported transcript remain untouched, and later recordings can proceed. The unreadable job cannot resume: start a separate transcript version from its saved recording, recovering an interrupted capture first if needed.
 
 ## Text, speakers, notes, and knowledge
 

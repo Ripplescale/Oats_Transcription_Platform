@@ -11,7 +11,7 @@ use std::{
 use tauri::{Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
-const ENDPOINT: &str = "https://github.com/Ripplescale/Hinglish-Transcription-Platform/releases/latest/download/latest.json";
+const ENDPOINT: &str = "https://github.com/Ripplescale/Oats_Transcription_Platform/releases/latest/download/latest.json";
 const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
 static HANDOFF: Lazy<policy::HandoffGate> = Lazy::new(policy::HandoffGate::default);
 

@@ -3,7 +3,7 @@ import { AudioLines, Check, Mic, NotebookPen } from 'lucide-react';
 import { useLocalWorkflow } from '@/contexts/LocalWorkflowContext';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { recordingTime } from '@/lib/transcript-workspace';
-import { profileChunkSeconds, trelisProfile } from '@/lib/local-transcription-workflow';
+import { isTerminalJob, profileChunkSeconds, trelisProfile } from '@/lib/local-transcription-workflow';
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
 import { PermissionWarning } from '@/components/PermissionWarning';
 import { TranscriptProcessingChecks } from '@/components/TranscriptProcessingChecks';
@@ -20,6 +20,8 @@ export function LiveTranscriptPanel() {
   const run = (primary?.fallbackRequested ? runs.find(item => item.role === 'fallback') : primary)
     ?? runs.find(item => item.role === 'live-draft') ?? runs[0];
   const live = run?.preferences.timing === 'during-recording';
+  const waitingForTranscription = run && (!run.recording || live) && !run.job && !run.error && !run.pausedByUser
+    && state.runs.some(item => item.job && !isTerminalJob(item.job.state));
   const isFallback = run?.role === 'fallback';
   const isLegacyDraft = run?.role === 'live-draft';
   const chunkSeconds = profileChunkSeconds(trelisProfile(run?.preferences.profile ?? state.preferences.profile));
@@ -33,6 +35,7 @@ export function LiveTranscriptPanel() {
       <h2 className="xx-heading text-[clamp(30px,3vw,44px)] leading-[1.12]">{isRecording ? isPaused ? 'A little pause.' : 'You talk. I’m all ears.' : <>Be here for the<br />conversation.</>}</h2>
       <p className="mt-5 max-w-[460px] text-[15px] leading-7 text-[var(--xx-muted)]">{isRecording ? isPaused ? 'Resume whenever you’re ready. Everything captured so far is saved.' : live ? !isDev ? 'Your audio is being saved. The transcript will appear here as you talk.' : isFallback ? 'Audio is being saved. Apex will replay it into a separate fallback version. Your Trelis text is kept.' : isLegacyDraft ? 'Audio is being saved. Apex adds a draft; Trelis prepares the final transcript after this call.' : `Audio is being saved. Trelis adds text in ${chunkSeconds}-second windows plus processing time, keeping the original Hindi + English script.` : 'Audio is being saved. Your transcript will be prepared when you stop recording.' : isDev ? 'A quiet place for your calls, transcripts and notes. Trelis listens while you talk and finishes any remaining audio after the call.' : 'A quiet place for your calls, transcripts and notes. Record a conversation and keep your own notes alongside it.'}</p>
       {(run?.error || run?.job?.error) && <p role="alert" className="mt-4 max-w-[460px] text-xs leading-5 text-amber-800">{failureMessage}</p>}
+      {waitingForTranscription && <p role="status" className="mt-4 max-w-[460px] text-xs leading-5 text-[var(--xx-muted)]">Your audio is saved. Waiting for another transcription to finish.</p>}
       {!isRecording && <div className="mt-7 flex flex-wrap gap-x-5 gap-y-2 text-xs text-[var(--xx-muted)]"><span className="flex items-center gap-1.5"><Mic size={13} />Record on your laptop</span><span className="flex items-center gap-1.5"><Check size={13} />Review at your pace</span></div>}
       {!isRecording && !permissions.isChecking && <div className="mt-5"><PermissionWarning hasMicrophone={permissions.hasMicrophone} hasSystemAudio={permissions.hasSystemAudio} onRecheck={permissions.checkPermissions} isRechecking={permissions.isChecking} /></div>}
     </div> : <div className="mx-auto max-w-3xl">
