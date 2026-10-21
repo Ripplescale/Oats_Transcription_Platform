@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { Suspense, useState, useEffect, useRef } from 'react';
 import { RecordingControls } from '@/components/RecordingControls';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
@@ -19,7 +19,7 @@ import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
 import { indexedDBService } from '@/services/indexedDBService';
 import { toast } from 'sonner';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { LocalTranscriptionPanel } from '@/components/LocalTranscriptionPanel';
 import { CaptureRecoveryPanel } from '@/components/CaptureRecoveryPanel';
 import { LiveTranscriptPanel } from '@/components/LiveTranscriptPanel';
@@ -29,12 +29,12 @@ import { LiveNoteEditor } from '@/components/LiveNoteEditor';
 import { useLocalWorkflow } from '@/contexts/LocalWorkflowContext';
 import { invoke } from '@tauri-apps/api/core';
 
-export default function Home() {
+function HomeContent() {
   // Local page state (not moved to contexts)
   const [isRecording, setIsRecordingState] = useState(false);
   const barHeights = ['10px', '18px', '12px'];
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
-  const [noteOpen, setNoteOpen] = useState(false);
+  const noteOpen = useSearchParams().get('view') === 'recording';
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [initialProject, setInitialProject] = useState<string | null | undefined>(undefined);
   const [noteSession, setNoteSession] = useState<string | null>(null);
@@ -77,6 +77,9 @@ export default function Home() {
   } = useTranscriptRecovery();
 
   const router = useRouter();
+  const navigate = (href: string) => {
+    if (window.dispatchEvent(new CustomEvent('xx-before-navigate', { cancelable: true, detail: { href } }))) router.push(href);
+  };
   const run = workflowState.runs.find(item => item.primary && item.capture.session_id === workflowState.currentSession && (item.recording || item.capture.session_id === noteSession));
   const titleMeeting = useRef<string | undefined>(undefined);
   titleMeeting.current = run?.meetingId;
@@ -86,14 +89,13 @@ export default function Home() {
   }, [run?.meetingId, meetings]);
   useEffect(() => {
     if (recordingState.isRecording) {
-      setNoteOpen(true);
       if (workflowState.currentSession) setNoteSession(workflowState.currentSession);
     }
   }, [recordingState.isRecording, workflowState.currentSession]);
   const newNote = async (projectId: string | null) => {
-    if (recordingState.isRecording || recordingState.isStartingRecording) { setNoteOpen(true); return; }
+    if (recordingState.isRecording || recordingState.isStartingRecording) { navigate('/?view=recording'); return; }
     titleDirty.current = false; titleGeneration.current += 1;
-    setNoteOpen(true); setTranscriptOpen(false); setInitialProject(projectId); setNoteSession(null); setNoteTitle('Untitled note'); setStartError(null);
+    navigate('/?view=recording'); setTranscriptOpen(false); setInitialProject(projectId); setNoteSession(null); setNoteTitle('Untitled note'); setStartError(null);
     try { await handleRecordingStart(); }
     catch (reason) { setStartError(`Recording could not start. Check your microphone and recording settings, then try again. ${String(reason)}`); }
   };
@@ -223,11 +225,8 @@ export default function Home() {
     <div className="xx-home xx-notes-home">
       <SettingsModals modals={modals} messages={messages} onClose={hideModal} />
       <TranscriptRecovery isOpen={showRecoveryDialog} onClose={handleDialogClose} recoverableMeetings={recoverableMeetings} onRecover={handleRecovery} onDelete={deleteRecoverableMeeting} onLoadPreview={loadMeetingTranscripts} />
-      {!noteOpen && !recordingState.isRecording ? <NoteLibrary onNewNote={projectId => void newNote(projectId)} busy={recordingState.isStartingRecording || isStopping || isSaving} recovery={<CaptureRecoveryPanel />} /> : <div className="xx-compose">
-        <header className="xx-compose-header"><div className="xx-compose-crumb"><button className="xx-icon-button" aria-label="Back to notes" disabled={recordingState.isRecording || recordingState.isStartingRecording} title={recordingState.isRecording ? 'Stop recording to return to your notes' : 'Back to notes'} onClick={() => {
-          const onProceed = () => setNoteOpen(false);
-          if (window.dispatchEvent(new CustomEvent('xx-before-navigate', { cancelable: true, detail: { href: '/', onProceed } }))) onProceed();
-        }}><ArrowLeft size={17} /></button><span>{new Date().toLocaleDateString(undefined, { month: 'long', day: 'numeric' })}</span></div><input className="xx-note-title" aria-label="Note title" value={noteTitle} disabled={!run?.meetingId} maxLength={200} onChange={event => { titleDirty.current = true; titleGeneration.current += 1; setNoteTitle(event.target.value); }} onBlur={() => void renameNote()} placeholder="Untitled note" /></header>
+      {!noteOpen ? <NoteLibrary onNewNote={projectId => void newNote(projectId)} busy={recordingState.isStartingRecording || isStopping || isSaving} recovery={<CaptureRecoveryPanel />} /> : <div className="xx-compose">
+        <header className="xx-compose-header"><div className="xx-compose-crumb"><button className="xx-icon-button" aria-label="Back to notes" disabled={recordingState.isStartingRecording} title="Back to notes" onClick={() => navigate('/')}><ArrowLeft size={17} /></button><span>{new Date().toLocaleDateString(undefined, { month: 'long', day: 'numeric' })}</span></div><input className="xx-note-title" aria-label="Note title" value={noteTitle} disabled={!run?.meetingId} maxLength={200} onChange={event => { titleDirty.current = true; titleGeneration.current += 1; setNoteTitle(event.target.value); }} onBlur={() => void renameNote()} placeholder="Untitled note" /></header>
         {startError && <p role="alert" className="xx-inline-error">{startError}</p>}
         {(run?.error || run?.job?.error) && <div role="alert" className="xx-inline-error">Audio is still being saved. Transcription needs attention; open Recording options to retry or use Apex fallback.</div>}
         {run?.meetingId ? <LiveNoteEditor key={run.meetingId} meetingId={run.meetingId} initialProject={initialProject} /> : <div className="xx-opening-note"><p>{recordingState.isStartingRecording ? 'Opening your note…' : 'Your note opens when recording starts.'}</p>{startError && <button className="xx-button-secondary" onClick={() => void newNote(initialProject ?? null)}>Try recording again</button>}</div>}
@@ -242,4 +241,8 @@ export default function Home() {
       </div>}
     </div>
   );
+}
+
+export default function Home() {
+  return <Suspense><HomeContent /></Suspense>;
 }

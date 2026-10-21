@@ -12,7 +12,7 @@ const MainContent: React.FC<MainContentProps> = ({ children }) => {
     <main
       className="xx-main xx-main-full"
     >
-      <AppHeader />
+      <React.Suspense><AppHeader /></React.Suspense>
       <div className="flex-1 min-h-0 min-w-0 w-full max-w-full overflow-hidden">
         {children}
       </div>

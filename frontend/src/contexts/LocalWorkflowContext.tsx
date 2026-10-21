@@ -39,10 +39,12 @@ export function LocalWorkflowProvider({ children }: { children: React.ReactNode 
       void callbacks.current.refetchMeetings();
       if (meetingId) {
         const href = `/meeting-details?id=${encodeURIComponent(meetingId)}`;
-        if (window.dispatchEvent(new CustomEvent('xx-before-navigate', { cancelable: true, detail: { href } }))) {
-          callbacks.current.router.push(href);
-        }
-        toast.success('Recording saved. Your transcript will appear as processing finishes.');
+        const openNote = () => {
+          if (window.dispatchEvent(new CustomEvent('xx-before-navigate', { cancelable: true, detail: { href } }))) callbacks.current.router.push(href);
+        };
+        const showingRecording = window.location.pathname === '/' && new URLSearchParams(window.location.search).get('view') === 'recording';
+        if (showingRecording) openNote();
+        toast.success('Recording saved. Your transcript will appear as processing finishes.', showingRecording ? undefined : { action: { label: 'Open note', onClick: openNote } });
       } else toast.warning('Audio is saved. The meeting needs recovery.', { description: error });
     },
   }));

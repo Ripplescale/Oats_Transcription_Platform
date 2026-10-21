@@ -135,13 +135,13 @@ async function installCleanLiveFixture(page) {
 
 async function targetedChecks(page, report, screen, checkSize) {
   await page.evaluate(() => window.qaCleanAddOrphan());
-  await page.getByRole('button', { name: /Sketchbook colour discussion/ }).waitFor();
-  const orphanGroup = page.locator('.xx-library-group').filter({ hasText: 'Unavailable project' });
+  await page.locator('.xx-note-row').filter({ hasText: 'Sketchbook colour discussion' }).waitFor();
+  const orphanGroup = page.locator('.xx-library-group').filter({ hasText: 'Unavailable folder' });
   assert.equal(await orphanGroup.count(), 1);
   assert.match(await orphanGroup.innerText(), /Sketchbook colour discussion/);
   assert.equal(await page.locator('.xx-note-row').count(), 4);
   await checkSize('orphan-project-home', 920, 740);
-  report.checks.push('All notes retains an orphaned project meeting under Unavailable project without silently dropping or reassigning it');
+  report.checks.push('All notes retains an orphaned project meeting under Unavailable folder without silently dropping or reassigning it');
 
   await page.evaluate(() => { window.qaCleanFailNextStart = true; });
   await page.locator('.xx-library-toolbar').getByRole('button', { name: 'New note', exact: true }).click();
