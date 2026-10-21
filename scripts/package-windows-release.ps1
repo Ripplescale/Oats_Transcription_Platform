@@ -83,10 +83,19 @@ $environment = @{
 $previous = @{}
 foreach ($name in $environment.Keys) {
     $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
-    [Environment]::SetEnvironmentVariable($name, $environment[$name], 'Process')
+    if ($null -eq $environment[$name]) {
+        # whisper-rs tests whether the variable exists, including an empty
+        # value. New PowerShell/.NET versions can preserve an empty variable
+        # when SetEnvironmentVariable receives $null; remove it explicitly.
+        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+    } else {
+        [Environment]::SetEnvironmentVariable($name, $environment[$name], 'Process')
+    }
 }
 Push-Location $frontendRoot
 try {
+    & $node -e 'if (Object.hasOwn(process.env, "WHISPER_DONT_GENERATE_BINDINGS")) { console.error("Windows releases must generate native Whisper bindings; the disable flag must be absent, not empty."); process.exit(1); }'
+    if ($LASTEXITCODE -ne 0) { throw 'Windows binding environment preflight failed.' }
     & $pnpm install --frozen-lockfile
     if ($LASTEXITCODE -ne 0) { throw 'Frozen frontend dependency installation failed.' }
     & $node --test (Join-Path $sourceRoot 'scripts/windows-update-feed.test.cjs') (Join-Path $frontendRoot 'tests/lib/updates.test.cjs') (Join-Path $frontendRoot 'tests/lib/local-transcription-workflow.test.cjs') (Join-Path $frontendRoot 'tests/lib/note-autosaver.test.cjs') (Join-Path $frontendRoot 'tests/lib/transcript-workspace.test.cjs')
@@ -114,5 +123,11 @@ try {
     Write-Host "No publication or installation was performed. Build staging remains at $StageRoot for inspection; remove it after acceptance."
 } finally {
     Pop-Location
-    foreach ($name in $previous.Keys) { [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process') }
+    foreach ($name in $previous.Keys) {
+        if ($null -eq $previous[$name]) {
+            Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+        } else {
+            [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process')
+        }
+    }
 }
