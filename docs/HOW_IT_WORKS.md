@@ -6,7 +6,7 @@ oats keeps audio as the source of truth and treats transcripts as editable inter
 
 1. **Open a new note.** Choose a project on the home screen, then click New note. This action starts microphone and system-audio capture and opens the writing canvas. Tracks are written independently with a session manifest and timing journal. Capture does not depend on a model loading successfully. Recording options remain available in the bottom bar.
 2. **Save before inference.** The worker builds bounded mono windows from saved audio on the session clock. Gaps and interruptions remain visible. Original tracks stay available for recovery.
-3. **Write while oats listens.** Notes autosave independently. Open the transcript with the microphone/up-arrow control when you want to check it. Computer audio appears in chat bubbles on the left and microphone audio on the right, in the existing transcript order. These labels identify recording sources, not individual speakers; older text without a known source stays neutral. Choose Trelis windows of 5, 10, or 20 seconds; new settings default to 10 seconds. A conservative Silero gate checks each window before local OpenVINO GPU inference and retains uncertain speech. Trelis preserves the original Hindi/English script.
+3. **Write while oats listens.** Notes autosave independently. Open the transcript with the microphone/up-arrow control when you want to check it. Computer audio appears in chat bubbles on the left and microphone audio on the right, in the existing transcript order. These labels identify recording sources, not individual speakers; older text without a known source stays neutral. Choose Trelis windows of 5, 10, or 20 seconds; new settings default to 10 seconds. Whole quiet microphone windows are omitted before speech detection and inference, as described below. A conservative Silero gate checks retained Trelis windows and retains uncertain speech. Trelis preserves the original Hindi/English script, with a small set of unambiguous hesitation fillers displayed in Roman script.
 4. **Stop and finish remaining audio.** Stopping capture lets the same Trelis job drain its backlog and process the final partial window. The display changes from Live transcript to Finishing transcript, then Final transcript on completion. There is no second full pass. “Final” means processing finished, not human verification.
 5. **Recover suspicious output.** Long repeated phrases or a reached generation limit trigger a retry using a neighborhood of up to 30 seconds. While recording, the app waits for the needed following audio and keeps the original text visible as provisional. A clean, nonempty retry replaces its covered range. Any untouched part of a neighboring window is transcribed separately, so the replacement neither duplicates that range nor guesses which words to trim. If that cannot be completed reliably, the app retries the original window in pieces of at most 5 seconds. A completed, nonempty combined fallback becomes the displayed and copied text even if repetition remains. Failed or entirely empty fallbacks retain the original. Every recovery remains marked for review, with originals and attempts preserved.
 6. **Review speakers.** Optional Community-1 runs after that recording and its transcription complete. Speaker labeling for a finished call can continue while Trelis transcribes your next call. Turns are mapped to transcript windows, overlapping candidates remain explicit, and manual names survive reconciliation. Live individual speaker identification remains future work.
@@ -36,8 +36,10 @@ flowchart LR
 flowchart TD
     A["Choose audio pieces of 5, 10, or 20 seconds<br/>Default: 10 seconds"] --> B["Record and save the audio"]
     B --> C["Take the next piece of audio"]
-    C --> D{"Does Silero detect speech?"}
-    D -->|No| E["Skip this piece"]
+    C --> V{"Whole microphone piece below<br/>the volume cutoff?"}
+    V -->|Yes| E["Skip this piece"]
+    V -->|No| D{"Does Silero detect speech?"}
+    D -->|No| E
     D -->|"Yes or unsure"| F["Trelis turns the speech into text"]
     F --> G{"Is the text stuck repeating<br/>or cut short by its length limit?"}
     G -->|No| H["Keep the text"]
@@ -57,7 +59,11 @@ flowchart TD
     N --> C
 ```
 
-Even one second of detected speech keeps the whole piece. If the speech check is unsure or fails, the app still tries to transcribe it. The original recording is always kept, and retried text is marked for review. Recovery is bounded: one surrounding-audio attempt followed by at most one pass through the original piece in 5-second parts. Retry pieces are never split recursively. At the beginning or end of a recording, surrounding audio is limited to what was actually saved. If transcription fails, the recording remains available to try again later.
+The microphone volume policy omits a whole window when no 20 ms frame exceeds RMS 0.006 (about -44.4 dBFS). It deliberately excludes faint background voices and computer-audio leakage, including real speech below the cutoff. It does not identify who spoke or prove silence. One frame above the cutoff retains the whole window for the usual speech check. Computer audio and unknown sources are exempt. The rule applies to recording-window Trelis and Apex jobs, and skips speech detection, decoding and text-triggered retries for qualifying microphone windows. Original recording files are retained. It still pays the cost of preparing and measuring the audio window.
+
+Existing microphone text labelled `very_quiet_audio` is omitted from normal live/saved transcript views and TXT, Markdown, JSON and Claude exports. Raw recognition remains available in development inspection; matching manual corrections take precedence. A newly omitted window records `quiet_microphone_omitted` and the cutoff in its provenance. Updating source code does not change already installed or running worker snapshots.
+
+After the microphone volume policy, even one second of detected speech keeps the whole piece. If the speech check is unsure or fails, the app still tries to transcribe it. The original recording is always kept, and retried text is marked for review. Recovery is bounded: one surrounding-audio attempt followed by at most one pass through the original piece in 5-second parts. Retry pieces are never split recursively. At the beginning or end of a recording, surrounding audio is limited to what was actually saved. If transcription fails, the recording remains available to try again later.
 
 The app can also offer a shorter retry when there is substantial audio but surprisingly little text. Generation diagnostics record the observed token count, end marker, length-limit status and text compression. Confidence and no-speech scores are unavailable in this adapter and never erase recognized speech. These checks do not guarantee accurate transcription. Soft repetition penalties were tested separately and are not enabled in this flow.
 

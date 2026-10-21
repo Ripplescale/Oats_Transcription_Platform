@@ -117,8 +117,9 @@ class TwoTrackQualificationTests(unittest.TestCase):
                     (job / 'stop.request').write_text('test pause')
                 return {'status': 'ok', 'text': 'यह एक test है'}
             original = local_worker.evaluate_window
-            def evaluate(*args):
-                return original(*args, infer=infer)
+            def evaluate(*args, **kwargs):
+                kwargs['infer'] = infer
+                return original(*args, **kwargs)
             with patch.object(socket.socket, 'connect', socket.socket.connect), patch.object(socket.socket, 'connect_ex', socket.socket.connect_ex), patch.object(socket, 'create_connection', socket.create_connection), patch.object(local_worker, 'parent_alive', return_value=True), patch.object(local_worker, 'evaluate_window', side_effect=evaluate):
                 first = local_worker.run(config, request)
                 self.assertEqual(first['state'], 'stopped')

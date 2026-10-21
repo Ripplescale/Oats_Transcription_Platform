@@ -137,7 +137,8 @@ def materialize(session: Path, rows: list[dict], start: float, end: float, targe
     target.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(target), 'wb') as wav:
         wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000); wav.writeframes(pcm.tobytes())
-    # Energy only selects review/retry candidates; it is not measured VAD.
+    # Volume measurement, not VAD. Whole quiet microphone windows are omitted
+    # by explicit user policy, including faint speech and background leakage.
     active = sum(float(np.sqrt(np.mean(values[i:i+320] ** 2))) > .006 for i in range(0, n, 320)) * .02
     return {'audio_sha256': file_digest(target), 'source_chunks': bindings,
             'uncovered_seconds': float((~covered).sum()) / 16000,
@@ -169,9 +170,10 @@ def review_flags(text: str, audio: dict, duration: float) -> list[str]:
         flags.append('capture_clock_overlap')
     if words and audio['active_energy_seconds'] == 0:
         # Quiet nonzero input can still produce a fluent or spurious draft.
-        # Keep every recognized word: energy is a review cue, not proof that
-        # nobody spoke and not a reason to erase a soft voice or short name.
+        # This remains a volume label, not a claim that nobody spoke.
         flags.append('very_quiet_audio')
+    if audio.get('volume_gate', {}).get('decision') == 'omit':
+        flags.append('quiet_microphone_omitted')
     if duration >= 10 and audio['active_energy_seconds'] >= 8 and len(words) < audio['active_energy_seconds'] * .4:
         flags.append('suspiciously_sparse_text')
     if repetition_details(text):
@@ -188,9 +190,19 @@ def _recognize_window(spec, config, session, rows, start, end, target, infer, sp
         return ({'status': 'ok', 'text': '', 'segments': [],
                  'warnings': ['Verified all-zero PCM; no speech inferred.'],
                  'provenance': {'digital_silence': True}, 'timing': {}}, audio)
+    source_tracks = {row.get('track') for row in rows
+                     if row['end_seconds'] > start and row['start_seconds'] < end}
+    if source_tracks == {'microphone'} and audio['active_energy_seconds'] == 0:
+        policy = {'decision': 'omit', 'reason': 'whole_microphone_window_below_volume_cutoff',
+                  'threshold_rms': .006, 'frame_seconds': .02, 'source_audio_preserved': True}
+        audio['volume_gate'] = policy
+        return ({'status': 'ok', 'text': '', 'segments': [],
+                 'warnings': ['Whole microphone window stayed below the volume cutoff; '
+                              'transcription omitted and original audio retained.'],
+                 'provenance': {'volume_gate': policy}, 'timing': {}}, audio)
     if spec.get('id') == 'trelis':
-        # No amplitude or energy threshold can discard a nonzero recording.
-        # Silero receives analysis gain only; the inference WAV remains unchanged.
+        # Retained windows reach Silero with analysis gain only. The explicit
+        # microphone volume policy runs first; inference audio is unchanged.
         try:
             assessment = gate(target, speech_gate)
         except Exception as exc:

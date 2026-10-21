@@ -5,7 +5,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import type { Transcript } from '@/types';
 import type { useTranscriptWorkspace } from '@/hooks/meeting-details/useTranscriptWorkspace';
-import { earlierCorrections, effectiveText, fetchCompleteTranscript, makeTranscriptExport, recordingTime } from '@/lib/transcript-workspace';
+import { earlierCorrections, effectiveText, fetchCompleteTranscript, hasTranscriptCorrection, makeTranscriptExport, omitQuietMicrophoneText, recordingTime } from '@/lib/transcript-workspace';
 import { Button } from '@/components/ui/button';
 import { ArrowUpRight, ChevronDown, Download, FileText, Headphones, Pencil, Info } from 'lucide-react';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
@@ -148,6 +148,10 @@ export function TranscriptWorkspacePanel({ meeting, review, hasMore, isLoadingMo
   };
 
   const keptCorrections = earlierCorrections(meeting.transcripts, review.workspace);
+  const reviewReady = review.loaded && review.workspace.meeting_id === meeting.id;
+  const omitted = reviewReady ? meeting.transcripts.filter(segment => omitQuietMicrophoneText(segment, review.workspace.segment_metadata?.[segment.id])
+    && !hasTranscriptCorrection(segment, review.workspace.corrections)) : [];
+  const visibleSegments = reviewReady ? meeting.transcripts.filter(segment => !omitted.includes(segment)) : [];
   const displacedDraft = editing !== null && !meeting.transcripts.some(segment => segment.id === editing.id && segment.text === editing.text);
   useEffect(() => { if (displacedDraft) retainedDraft.current?.scrollIntoView({ block: 'nearest' }); }, [displacedDraft]);
   return <section className="flex h-full min-h-0 min-w-0 flex-col bg-[var(--xx-paper)] text-[var(--xx-ink)]" aria-label="Transcript review">
@@ -203,9 +207,11 @@ export function TranscriptWorkspacePanel({ meeting, review, hasMore, isLoadingMo
         <div className="flex gap-2"><button className="xx-button-primary text-xs" disabled={review.saving} onClick={() => { review.updateCorrection(editing, draft); setEditing(null); }}>Apply correction</button><button className="xx-button-secondary text-xs" onClick={() => setEditing(null)}>Cancel</button></div>
       </div>}
       {!meeting.transcripts.length && <div className="py-12 text-center"><Headphones className="mx-auto mb-3 text-[var(--xx-accent)]" size={26} /><p className="text-sm text-[var(--xx-muted)]">{pendingFinal ? 'The final transcript is on its way.' : 'Your words will appear here.'}</p><p className="mt-2 text-xs leading-5 text-[var(--xx-muted)]">{!isDev ? 'Your saved audio is kept while the transcript is prepared.' : pendingFinal ? 'Trelis processes the saved audio after the call. You can read the Apex live draft while you wait.' : activeRole === 'fallback' ? 'Apex replays the saved recording into this separate version.' : 'Audio is transcribed in the selected chunks plus processing time. Your original recording is retained.'}</p></div>}
-      {meeting.transcripts.map(segment => {
-        const text = effectiveText(segment, review.workspace.corrections);
-        const corrected = text !== segment.text;
+      {!reviewReady && <p role="status" className="p-4 text-sm text-[var(--xx-muted)]">{review.error ? 'Transcript review could not be loaded.' : 'Loading transcript…'}</p>}
+      {reviewReady && !!omitted.length && !visibleSegments.length && <p className="p-4 text-sm text-[var(--xx-muted)]">Quiet microphone audio omitted. Your original recording is saved.</p>}
+      {visibleSegments.map(segment => {
+        const text = effectiveText(segment, review.workspace.corrections, review.workspace.segment_metadata?.[segment.id]);
+        const corrected = hasTranscriptCorrection(segment, review.workspace.corrections);
         const track = segment.source_track ?? review.workspace.segment_metadata?.[segment.id]?.source_track;
         const channel = track === 'system' || track === 'microphone' ? track : 'unknown';
         const sourceLabel = channel === 'system' ? 'Computer audio' : channel === 'microphone' ? 'Microphone' : 'Source unavailable';
@@ -226,12 +232,13 @@ export function TranscriptWorkspacePanel({ meeting, review, hasMore, isLoadingMo
             <textarea aria-label="Correct transcript text" className="w-full min-h-32 border border-[var(--xx-border)] bg-white/50 rounded-xl p-3 text-[15px] leading-7 focus:outline-[var(--xx-accent)]" value={draft} onChange={event => setDraft(event.target.value)} />
             <div className="flex gap-2"><button className="xx-button-primary text-xs" disabled={review.saving} onClick={() => { review.updateCorrection(segment, draft); setEditing(null); }}>Apply correction</button><button className="xx-button-secondary text-xs" onClick={() => setEditing(null)}>Cancel</button></div>
           </div> : <p className="xx-transcript-message-text whitespace-pre-wrap text-[15px] leading-[1.85]">{text}</p>}
-          {isDev && corrected && <details className="text-xs text-gray-500"><summary className="cursor-pointer">Original recognition</summary><p className="whitespace-pre-wrap leading-6 mt-2">{segment.text}</p></details>}
+          {isDev && text !== segment.text && <details className="text-xs text-gray-500"><summary className="cursor-pointer">Original recognition</summary><p className="whitespace-pre-wrap leading-6 mt-2">{segment.text}</p></details>}
           {stale && <p className="text-xs text-amber-700">A saved correction belongs to an earlier recognition result and was not applied.</p>}
           {isDev && !!speakers?.speaker_candidates.length && <p className="text-[11px] text-[var(--xx-muted)]" title="Estimated speakers heard in this audio window. Individual words are not assigned to a person.">Heard in this window: {speakers.speaker_candidates.map(id => review.workspace.speaker_names?.[id] || id).join(', ')}{speakers.has_overlap ? ' · overlapping speech' : ''}</p>}
           {isDev && <TranscriptProcessingChecks metadata={metadata} startSeconds={segment.audio_start_time} endSeconds={segment.audio_end_time} />}
         </article>;
       })}
+      {isDev && !!omitted.length && <details className="m-4 text-xs text-[var(--xx-muted)]"><summary>{omitted.length} quiet microphone chunks omitted on this page</summary><p>Original recognition retained for inspection; excluded from transcript exports.</p>{omitted.map(segment => <p key={segment.id} className="mt-2 whitespace-pre-wrap">{recordingTime(segment.audio_start_time)} · {segment.text}</p>)}</details>}
       {hasMore && <Button variant="outline" className="w-full" disabled={isLoadingMore} onClick={onLoadMore}>{isLoadingMore ? 'Loading…' : 'Load more transcript'}</Button>}
     </div>
     {!playback && <footer className="shrink-0 border-t border-[var(--xx-border)] px-4 py-3 space-y-2 bg-[var(--xx-paper)]">

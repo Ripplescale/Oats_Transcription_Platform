@@ -146,15 +146,15 @@ class LocalWorkerTests(unittest.TestCase):
         self.assertEqual(len(calls),3)
         self.assertEqual([(p['start_seconds'],p['end_seconds']) for p in result['alternative']['chunks']],[(0,10),(10,15)])
 
-    def test_only_digital_silence_bypasses_inference(self):
+    def test_digital_silence_bypasses_inference(self):
         row = self.chunk(0,np.zeros(16000))
         def infer(*args): self.fail('All-zero PCM must not call a model')
         result = worker.evaluate_window({}, {}, self.session,[row],0,1,self.root/'zero.wav',infer)
         self.assertEqual(result['text'],'')
         self.assertTrue(result['audio']['digital_silence'])
 
-    def test_quiet_nonzero_audio_preserves_recognition_and_flags_review(self):
-        row = self.chunk(0, np.ones(16000) * 8)
+    def test_quiet_system_audio_preserves_recognition_and_flags_review(self):
+        row = self.chunk(0, np.ones(16000) * 8, track='system')
         for text in ('nan', 'Mira'):
             with self.subTest(text=text):
                 calls = []
@@ -171,6 +171,48 @@ class LocalWorkerTests(unittest.TestCase):
         result = worker.evaluate_window({}, {}, self.session, [loud], 1, 2,
                                         self.root / 'audible.wav', infer)
         self.assertNotIn('very_quiet_audio', result['quality_flags'])
+
+    def test_whole_quiet_microphone_window_skips_detector_decoder_and_retries(self):
+        row = self.chunk(0, np.ones(20 * 16000) * 196)
+        before = file_digest(self.session / row['file'])
+        for model in ('trelis', 'apex'):
+            with self.subTest(model=model):
+                with patch.object(worker, 'transcribe') as infer, patch.object(worker, 'assess_window') as gate:
+                    result = worker.evaluate_window({'id': model}, {}, self.session, [row], 0, 20,
+                                                    self.root / 'quiet.wav', infer, gate=gate)
+                    infer.assert_not_called()
+                    gate.assert_not_called()
+                self.assertEqual(result['text'], '')
+                self.assertFalse(result['audio']['digital_silence'])
+                self.assertIn('quiet_microphone_omitted', result['quality_flags'])
+                self.assertIsNone(result['alternative'])
+                policy = result['result']['provenance']['volume_gate']
+                self.assertEqual(policy['threshold_rms'], .006)
+                self.assertTrue(policy['source_audio_preserved'])
+        self.assertEqual(file_digest(self.session / row['file']), before)
+
+    def test_one_frame_above_microphone_cutoff_retains_whole_window(self):
+        samples = np.ones(16000) * 8
+        samples[320:640] = 197
+        row = self.chunk(0, samples)
+        def infer(*args):
+            return {'status': 'ok', 'text': 'हाँ, keep the whole sentence'}
+        with patch.object(worker, 'transcribe', side_effect=infer) as model:
+            result = worker.evaluate_window({'id': 'trelis'}, {}, self.session, [row], 0, 1,
+                                            self.root / 'audible-frame.wav', model, gate=self.keep_gate)
+        model.assert_called_once()
+        self.assertEqual(result['text'], 'हाँ, keep the whole sentence')
+        self.assertNotIn('quiet_microphone_omitted', result['quality_flags'])
+        self.assertNotIn('very_quiet_audio', result['quality_flags'])
+
+    def test_quiet_unidentified_track_is_not_assumed_to_be_microphone(self):
+        row = self.chunk(0, np.ones(16000) * 8, track='unknown')
+        with patch.object(worker, 'transcribe', return_value={'status': 'ok', 'text': 'keep me'}) as model:
+            result = worker.evaluate_window({'id': 'trelis'}, {}, self.session, [row], 0, 1,
+                                            self.root / 'unknown.wav', model, gate=self.keep_gate)
+        model.assert_called_once()
+        self.assertEqual(result['text'], 'keep me')
+        self.assertNotIn('quiet_microphone_omitted', result['quality_flags'])
 
     def keep_gate(self, *args):
         return {'status': 'ok', 'skip_stt': False, 'decision': 'keep',
@@ -824,7 +866,7 @@ class LocalWorkerTests(unittest.TestCase):
                 self.assertEqual(file_digest(self.session / row['file']), before)
 
     def test_conservative_gate_skip_retains_nonzero_audio_and_unavailable_keeps_words(self):
-        row = self.chunk(0, np.ones(20 * 16000) * 8)
+        row = self.chunk(0, np.ones(20 * 16000) * 8, track='system')
         before = file_digest(self.session / row['file'])
         def infer(*args):
             return {'status': 'ok', 'text': 'Mira'}
