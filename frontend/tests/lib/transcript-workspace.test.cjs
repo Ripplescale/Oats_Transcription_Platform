@@ -10,8 +10,102 @@ const richContext = { exports: {}, URL, require };
 vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname, '../../src/lib/rich-notes.ts'), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS } }).outputText, richContext);
 const context = { exports: {}, require: name => name === './rich-notes' ? richContext.exports : require(name) };
 vm.runInNewContext(compiled.outputText, context);
-const { earlierCorrections, effectiveText, setCorrection, emptyWorkspace, mergeSavedWorkspace, makeTranscriptExport, fetchCompleteTranscript, recordingTime } = context.exports;
+const { earlierCorrections, effectiveText, hasTranscriptCorrection, omitQuietMicrophoneText, romanizeTranscriptFillers, setCorrection, emptyWorkspace, mergeSavedWorkspace, makeTranscriptExport, fetchCompleteTranscript, recordingTime } = context.exports;
 const segment = { id: 'one', text: 'सात notebooks for Mira', timestamp: '10:00', audio_start_time: 65 };
+
+test('quiet policy requires microphone source and an explicit whole-window volume flag', () => {
+  const quiet = { source_track: 'microphone', quality_flags: ['very_quiet_audio'] };
+  assert.equal(omitQuietMicrophoneText(quiet), true);
+  assert.equal(omitQuietMicrophoneText({}, quiet), true);
+  assert.equal(omitQuietMicrophoneText({ source_track: 'system', quality_flags: quiet.quality_flags }), false);
+  assert.equal(omitQuietMicrophoneText({ quality_flags: quiet.quality_flags }), false);
+  assert.equal(omitQuietMicrophoneText({ source_track: 'microphone', quality_flags: ['repeated_phrase'] }), false);
+  assert.equal(omitQuietMicrophoneText({ source_track: 'microphone', quality_flags: ['quiet_microphone_omitted'] }), true);
+});
+
+test('quiet microphone originals stay stored but are omitted from every transcript export', () => {
+  const quiet = { ...segment, id: 'quiet', text: 'UNWANTED background hallucination' };
+  const system = { ...segment, id: 'system', text: 'Keep computer audio', source_track: 'system' };
+  const workspace = emptyWorkspace('m');
+  workspace.segment_metadata = {
+    quiet: { source_track: 'microphone', quality_flags: ['very_quiet_audio'] },
+    system: { source_track: 'system', quality_flags: ['very_quiet_audio'] },
+  };
+  workspace.superseded_segments = [{ id: 'old-quiet', text: 'UNWANTED archived hallucination',
+    source_track: 'microphone', quality_flags: ['very_quiet_audio'] }];
+  const before = JSON.stringify({ quiet, system, workspace });
+  assert.equal(effectiveText(quiet, [], workspace.segment_metadata.quiet), '');
+  for (const format of ['txt', 'md', 'json', 'claude']) {
+    const output = makeTranscriptExport({ id: 'm', title: 'Quiet policy' }, [quiet, system], workspace, format);
+    assert.ok(!output.includes('UNWANTED'), format);
+    assert.ok(output.includes(system.text), format);
+    if (format === 'json') {
+      const parsed = JSON.parse(output);
+      assert.equal(parsed.segments.length, 1);
+      assert.equal(parsed.superseded_segments.length, 0);
+      assert.equal(parsed.omitted_segments[0].id, quiet.id);
+      assert.equal(parsed.omitted_segments[0].text, undefined);
+    }
+  }
+  assert.equal(JSON.stringify({ quiet, system, workspace }), before);
+});
+
+test('a matching manual correction restores a quiet segment but a stale correction does not', () => {
+  const raw = { ...segment, source_track: 'microphone', quality_flags: ['very_quiet_audio'] };
+  const workspace = emptyWorkspace('m');
+  workspace.corrections = setCorrection([], raw, 'My intentional correction', 'now');
+  assert.equal(effectiveText(raw, workspace.corrections), 'My intentional correction');
+  let output = JSON.parse(makeTranscriptExport({ id: 'm', title: 'Review' }, [raw], workspace, 'json'));
+  assert.equal(output.segments[0].text, 'My intentional correction');
+  const replaced = { ...raw, text: 'new quiet hallucination' };
+  assert.equal(effectiveText(replaced, workspace.corrections), '');
+  output = JSON.parse(makeTranscriptExport({ id: 'm', title: 'Review' }, [replaced], workspace, 'json'));
+  assert.equal(output.segments.length, 0);
+});
+
+test('hesitations use Roman spelling while Hindi words and boundaries remain intact', () => {
+  const raw = 'अम्म, अः… हम्म! उम्म?\nउह — अम् / उम्; ह्म्म। अम्म्म हम्म्म';
+  assert.equal(romanizeTranscriptFillers(raw), 'umm, uh… hmm! umm?\nuh — umm / umm; hmm। umm hmm');
+  const hindi = 'हम, हाँ, जी, उमंग, अम्मा, उम्मेद, अहम, दुःख, uh, umm, hmm, xअम्म, अम्म2, अम्म_नाम, अम्म\u200dनाम';
+  assert.equal(romanizeTranscriptFillers(hindi), hindi);
+  assert.equal(romanizeTranscriptFillers('constructor toString __proto__'), 'constructor toString __proto__');
+  const once = romanizeTranscriptFillers(raw);
+  assert.equal(romanizeTranscriptFillers(once), once);
+});
+
+test('presentation formatting does not become a manual correction or mutate raw output', () => {
+  const raw = { ...segment, text: 'अम्म, ठीक है। अः' };
+  assert.equal(effectiveText(raw, []), 'umm, ठीक है। uh');
+  assert.equal(hasTranscriptCorrection(raw, []), false);
+  assert.equal(setCorrection([], raw, effectiveText(raw, []), 'now').length, 0);
+  const output = JSON.parse(makeTranscriptExport({ id: 'm', title: 'Fillers' }, [raw], emptyWorkspace('m'), 'json'));
+  assert.equal(output.segments[0].text, 'umm, ठीक है। uh');
+  assert.equal(output.segments[0].original_text, raw.text);
+  assert.equal(output.segments[0].corrected, false);
+  assert.equal(output.segments[0].presentation_normalized, true);
+  assert.equal(raw.text, 'अम्म, ठीक है। अः');
+});
+
+test('manual corrections retain the user spelling and stale corrections stay separate', () => {
+  const raw = { ...segment, text: 'अम्म, ठीक है। अः' };
+  const corrections = setCorrection([], raw, 'अम्म — my chosen spelling', 'now');
+  assert.equal(effectiveText(raw, corrections), 'अम्म — my chosen spelling');
+  assert.equal(hasTranscriptCorrection(raw, corrections), true);
+  assert.equal(effectiveText({ ...raw, text: 'हम्म, नया परिणाम' }, corrections), 'hmm, नया परिणाम');
+  const workspace = { ...emptyWorkspace('m'), corrections };
+  const output = JSON.parse(makeTranscriptExport({ id: 'm', title: 'Fillers' }, [raw], workspace, 'json'));
+  assert.equal(output.segments[0].corrected, true);
+  assert.equal(output.segments[0].presentation_normalized, false);
+});
+
+test('text, Markdown and Claude exports use the same filler formatting', () => {
+  for (const format of ['txt', 'md', 'claude']) {
+    const raw = { ...segment, text: 'अम्म, अः — हम ठीक हैं।' };
+    const output = makeTranscriptExport({ id: 'm', title: 'Fillers' }, [raw], emptyWorkspace('m'), format);
+    assert.ok(output.includes('umm, uh — हम ठीक हैं।'));
+    assert.ok(!output.includes('अम्म'));
+  }
+});
 
 test('native script and raw recognition survive correction and JSON export', () => {
   const workspace = emptyWorkspace('meeting');

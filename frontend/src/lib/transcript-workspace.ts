@@ -40,6 +40,7 @@ export interface TranscriptArchivedSegment {
   id: string;
   text: string;
   source_track?: string;
+  quality_flags?: string[];
   start_seconds?: number;
   end_seconds?: number;
   superseded_by?: string[];
@@ -93,10 +94,39 @@ export function sameWorkspaceEdits(left: TranscriptWorkspace, right: TranscriptW
   return stableNotesValue(workspaceEdits(left)) === stableNotesValue(workspaceEdits(right));
 }
 
-export function effectiveText(segment: Transcript, corrections: TranscriptCorrection[]): string {
+// Only unambiguous, whole-token hesitation spellings. Other Hindi stays verbatim.
+const ROMAN_FILLERS: Readonly<Record<string, string>> = {
+  'अम्म': 'umm', 'अम्म्म': 'umm', 'अम्': 'umm',
+  'उम्म': 'umm', 'उम्म्म': 'umm', 'उम्': 'umm',
+  'अः': 'uh', 'उह': 'uh',
+  'हम्म': 'hmm', 'हम्म्म': 'hmm', 'ह्म्म': 'hmm',
+};
+
+export function romanizeTranscriptFillers(text: string): string {
+  return text.replace(/[\p{L}\p{M}\p{N}\p{Pc}\u200c\u200d]+/gu, token =>
+    Object.prototype.hasOwnProperty.call(ROMAN_FILLERS, token) ? ROMAN_FILLERS[token] : token);
+}
+
+export function hasTranscriptCorrection(segment: Transcript, corrections: TranscriptCorrection[]): boolean {
+  return corrections.some(item => item.segment_id === segment.id && item.original_text === segment.text && item.text !== segment.text);
+}
+
+/** very_quiet_audio means no 20 ms frame exceeds RMS .006 (about -44.4 dBFS).
+ * This is a deliberate microphone volume policy, not a no-speech claim. */
+export function omitQuietMicrophoneText(
+  segment: { source_track?: string; quality_flags?: string[] },
+  metadata?: TranscriptSegmentMetadata,
+): boolean {
+  const track = segment.source_track ?? metadata?.source_track;
+  const flags = [...(segment.quality_flags ?? []), ...(metadata?.quality_flags ?? [])];
+  return track === 'microphone' && flags.some(flag => flag === 'very_quiet_audio' || flag === 'quiet_microphone_omitted');
+}
+
+export function effectiveText(segment: Transcript, corrections: TranscriptCorrection[], metadata?: TranscriptSegmentMetadata): string {
   // A new ASR run must not silently inherit corrections to different source text.
   const correction = corrections.find(item => item.segment_id === segment.id && item.original_text === segment.text);
-  return correction?.text ?? segment.text;
+  // A saved manual correction always takes precedence over presentation rules.
+  return correction?.text ?? (omitQuietMicrophoneText(segment, metadata) ? '' : romanizeTranscriptFillers(segment.text));
 }
 
 /** Ignore unloaded pages unless the archive confirms that their source was replaced. */
@@ -110,7 +140,8 @@ export function earlierCorrections(segments: Transcript[], workspace: Transcript
 
 export function setCorrection(corrections: TranscriptCorrection[], segment: Transcript, text: string, now: string): TranscriptCorrection[] {
   const remaining = corrections.filter(item => item.segment_id !== segment.id);
-  return text === segment.text ? remaining : [...remaining, { segment_id: segment.id, original_text: segment.text, text, updated_at: now }];
+  return text === segment.text || text === romanizeTranscriptFillers(segment.text)
+    ? remaining : [...remaining, { segment_id: segment.id, original_text: segment.text, text, updated_at: now }];
 }
 
 export function recordingTime(seconds: number | undefined): string {
@@ -153,15 +184,18 @@ export function makeTranscriptExport(
   format: 'txt' | 'md' | 'json' | 'claude',
   hasUnsavedEdits = false,
 ): string {
-  const rows = segments.map(segment => ({
+  const retained = segments.filter(segment => !omitQuietMicrophoneText(segment, workspace.segment_metadata?.[segment.id])
+    || hasTranscriptCorrection(segment, workspace.corrections));
+  const rows = retained.map(segment => ({
     id: segment.id,
     start_seconds: segment.audio_start_time ?? null,
     end_seconds: segment.audio_end_time ?? null,
     timestamp_precision: segment.audio_start_time == null ? 'unavailable' : 'segment_or_chunk_boundary_not_word_aligned',
     wall_clock_timestamp: segment.timestamp,
     original_text: segment.text,
-    text: effectiveText(segment, workspace.corrections),
-    corrected: effectiveText(segment, workspace.corrections) !== segment.text,
+    text: effectiveText(segment, workspace.corrections, workspace.segment_metadata?.[segment.id]),
+    corrected: hasTranscriptCorrection(segment, workspace.corrections),
+    presentation_normalized: !hasTranscriptCorrection(segment, workspace.corrections) && effectiveText(segment, workspace.corrections, workspace.segment_metadata?.[segment.id]) !== segment.text,
     source_track: segment.source_track ?? workspace.segment_metadata?.[segment.id]?.source_track ?? null,
     speaker_id: segment.speaker_id ?? null,
     quality_flags: workspace.segment_metadata?.[segment.id]?.quality_flags ?? [],
@@ -177,7 +211,12 @@ export function makeTranscriptExport(
     source_job_id: workspace.source_job_id ?? null, source_meeting_id: workspace.source_meeting_id ?? null,
     workflow_role: workspace.workflow_role ?? null,
     notes: workspace.notes, notes_document: workspace.notes_document ?? null, corrections: workspace.corrections, segments: rows,
-    segments_revision: workspace.segments_revision ?? null, superseded_segments: workspace.superseded_segments ?? [],
+    segments_revision: workspace.segments_revision ?? null,
+    superseded_segments: (workspace.superseded_segments ?? []).filter(segment => !omitQuietMicrophoneText(segment)),
+    omitted_segments: segments.filter(segment => !retained.includes(segment)).map(segment => ({
+      id: segment.id, start_seconds: segment.audio_start_time ?? null, end_seconds: segment.audio_end_time ?? null,
+      reason: 'whole_microphone_window_below_volume_cutoff',
+    })),
     speaker_names: workspace.speaker_names ?? {}, speaker_metadata: workspace.speaker_metadata ?? null,
   }, null, 2);
   const body = rows.map(row => `[${recordingTime(row.start_seconds ?? undefined)}]${row.source_track ? ` (${row.source_track} track)` : ''} ${row.text}`).join('\n\n');
