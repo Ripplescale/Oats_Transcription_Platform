@@ -6,6 +6,10 @@ pub mod source_archive;
 pub mod storage_retention;
 
 #[cfg(test)]
+#[path = "../../src/bundled_asr_runtime.rs"]
+mod bundled_asr_runtime;
+
+#[cfg(test)]
 #[path = "../../src/dictation/engine.rs"]
 mod dictation_engine;
 #[cfg(test)]
@@ -134,6 +138,28 @@ mod runtime_snapshots {
     use serde_json::{json, Value};
     use std::{fs, path::{Path, PathBuf}};
     include!(concat!(env!("OUT_DIR"), "/runtime_snapshots.rs"));
+
+    #[test]
+    fn release_worker_is_snapshotted_for_new_job_and_preserved_on_resume() {
+        let root = tempfile::tempdir().unwrap();
+        let job = root.path().join("new-job"); fs::create_dir(&job).unwrap();
+        let current = root.path().join("runtime.json");
+        let original = synthetic_asr_runtime(root.path(), "configured-models");
+        let global_bytes = serde_json::to_vec(&original).unwrap();
+        fs::write(&current, &global_bytes).unwrap();
+        let candidate = crate::bundled_asr_runtime::candidate_config(&job, &current).unwrap();
+        let snapshot = ensure_job_runtime_snapshot(&job, &candidate).unwrap();
+        let committed = fs::read(&snapshot).unwrap();
+        let configured = read(&snapshot).unwrap();
+        assert_eq!(configured["models"], original["models"]);
+        assert_ne!(configured["worker_script"], original["worker_script"]);
+        assert_eq!(fs::read(&current).unwrap(), global_bytes);
+        fs::write(job.join("status.json"), br#"{"state":"stopped"}"#).unwrap();
+        fs::write(&current, b"unavailable global runtime after update").unwrap();
+        let resumed = crate::bundled_asr_runtime::candidate_config(&job, &current).unwrap();
+        assert_eq!(ensure_job_runtime_snapshot(&job, &resumed).unwrap(), snapshot);
+        assert_eq!(fs::read(snapshot).unwrap(), committed);
+    }
 }
 
 #[cfg(test)]

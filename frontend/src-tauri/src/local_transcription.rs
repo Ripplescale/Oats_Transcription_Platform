@@ -201,7 +201,8 @@ pub async fn ensure_capture_meeting(state: tauri::State<'_,AppState>, session_di
 
 fn launch(id: &str) -> Result<(), String> {
     let dir = job_dir(id)?;
-    let snapshot = ensure_job_runtime_snapshot(&dir, &config_path()?)?;
+    let candidate = crate::bundled_asr_runtime::candidate_config(&dir, &config_path()?)?;
+    let snapshot = ensure_job_runtime_snapshot(&dir, &candidate)?;
     launch_process(WorkerKind::Transcription, id, &snapshot, &dir)
 }
 

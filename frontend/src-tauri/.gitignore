@@ -4,4 +4,5 @@
 /gen/schemas
 
 Cargo.lock
+!capture-core-tests/Cargo.lock
 Cargo.toml.orig

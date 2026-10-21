@@ -12,6 +12,14 @@ reporting that the update is available. Ordinary branch pushes remain developmen
 work; they do not distribute an installer. Installing locally is a separate user
 action and is not part of publishing.
 
+Starting with 0.8.8, the executable embeds the reviewed recording-worker Python
+source and model registry. On the first launch of a new job it creates an
+immutable source copy inside that job and snapshots the existing local Python,
+model paths and speech-gate settings with it. Existing jobs keep their original
+snapshots. The update does not replace the global runtime setup or download
+models. This carries worker fixes such as pre-ASR quiet-microphone suppression
+through the signed app update rather than requiring a separate runtime install.
+
 The repository is now `Ripplescale/Oats_Transcription_Platform`. The workflow is
 bound to repository ID `1398488057`, so another rename does not disable releases.
 Existing 0.8.3–0.8.5 clients accept only the previous repository's download path.

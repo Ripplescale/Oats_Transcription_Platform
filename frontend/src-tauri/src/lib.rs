@@ -41,6 +41,7 @@ pub mod audio;
 pub mod config;
 pub mod local_workspace;
 pub mod local_transcription;
+mod bundled_asr_runtime;
 mod storage_retention;
 pub mod console_utils;
 pub mod database;

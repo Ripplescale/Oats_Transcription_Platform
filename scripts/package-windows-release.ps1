@@ -100,6 +100,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Frozen frontend dependency installation failed.' }
     & $node --test (Join-Path $sourceRoot 'scripts/windows-update-feed.test.cjs') (Join-Path $frontendRoot 'tests/lib/updates.test.cjs') (Join-Path $frontendRoot 'tests/lib/local-transcription-workflow.test.cjs') (Join-Path $frontendRoot 'tests/lib/note-autosaver.test.cjs') (Join-Path $frontendRoot 'tests/lib/transcript-workspace.test.cjs')
     if ($LASTEXITCODE -ne 0) { throw 'Release regression checks failed. No installer was published.' }
+    & $node --test (Join-Path $frontendRoot 'tests/lib/transcript-fillers-render.test.cjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Visible transcript regression checks failed. No installer was published.' }
+    & cargo test --locked --manifest-path (Join-Path $nativeRoot 'capture-core-tests/Cargo.toml') --lib
+    if ($LASTEXITCODE -ne 0) { throw 'Bundled recording-worker regression checks failed. No installer was published.' }
     $policyTests = Join-Path $StageRoot 'updater-policy-tests.exe'
     & rustc --test --edition=2021 (Join-Path $nativeRoot 'src/updates/policy.rs') -o $policyTests
     if ($LASTEXITCODE -ne 0) { throw 'Updater policy tests did not compile.' }
