@@ -5,7 +5,7 @@ import io
 from pathlib import Path
 import zipfile
 
-from build_bundle import archive, compile_setup, digest, read, runtime_file
+from build_bundle import archive, compile_setup, digest, embed_msvc, read, runtime_file
 
 
 class JoinedReader(io.RawIOBase):
@@ -66,6 +66,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--inputs", type=Path, required=True)
     args = parser.parse_args()
     original = read(args.source / "bundle.json")
     paths = [args.source / part["name"] for part in original["parts"]]
@@ -84,6 +85,7 @@ def main():
         files = json.loads(raw)["files"]
         sources = {f["path"]: ZipSource(zipped, f) for f in files if runtime_file(f["path"])}
         result = archive(sources, target, original["id"])
+    embed_msvc(result, target, args.inputs)
     compile_setup(result, target)
     print(json.dumps({"id": result["id"], "files": len(sources), "removed_build_files": len(files) - len(sources), "installed_bytes": result["installed_bytes"], "download_bytes": sum(p["size"] for p in result["parts"])}), flush=True)
 

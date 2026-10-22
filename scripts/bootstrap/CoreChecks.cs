@@ -62,6 +62,10 @@ public static class CoreChecks {
         foreach(string name in new[]{"../escape","C:/escape","python/CON.txt","python/a\\b","python/trailing. ","/root","python//x"}) Reject(()=>PackageCore.Relative(name),name);
         Downloads(folder);
         Archives(folder);
+        Bundle b=new Bundle {schema=1,id=new string('a',20),payload_id=new string('b',20),app_version="0.8.8",installed_bytes=1,payload_manifest_sha256=new string('0',64),parts=new[]{new Asset {name="oats-runtime-"+new string('b',20)+".zip.part001",url="https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-"+new string('b',20)+"/oats-runtime-"+new string('b',20)+".zip.part001",size=1,sha256=new string('0',64)}}};
+        PackageCore.Validate(b); checks++;
+        b.parts[0].url="https://example.com/part"; Reject(()=>PackageCore.Validate(b),"non-GitHub linked payload");
+        b.payload_id="../invalid"; Reject(()=>PackageCore.Validate(b),"unsafe linked release identity");
         Console.WriteLine(checks + " transport and path checks passed");
     }
     static void Archives(string folder) {
@@ -103,6 +107,16 @@ public static class CoreChecks {
         if(args.Length==0) {
             string folder=Path.Combine(Path.GetTempPath(),"oats-setup-check-"+Guid.NewGuid().ToString("N")); Directory.CreateDirectory(folder);
             try { Fixtures(folder); } finally { Directory.Delete(PackageCore.LongPath(folder),true); } return;
+        }
+        if(args[0]=="embedded") {
+            var assembly=System.Reflection.Assembly.LoadFrom(args[1]); Bundle embeddedBundle;
+            using(Stream s=assembly.GetManifestResourceStream("bundle.json")) using(StreamReader r=new StreamReader(s)) embeddedBundle=PackageCore.Json.Deserialize<Bundle>(r.ReadToEnd());
+            PackageCore.Validate(embeddedBundle);
+            using(Stream s=assembly.GetManifestResourceStream("msvc-runtime.zip")) using(ZipArchive zip=new ZipArchive(s,ZipArchiveMode.Read)) {
+                Payload p=PackageCore.ReadPayload(zip,new Bundle {installed_bytes=embeddedBundle.runtime_bytes,payload_manifest_sha256=embeddedBundle.runtime_manifest_sha256});
+                PackageCore.Extract(zip,p,args[2],x=>{},CancellationToken.None);
+                Console.WriteLine("Embedded Microsoft CRT verified and extracted: "+p.files.Length+" entries");
+            } return;
         }
         Bundle b=PackageCore.Json.Deserialize<Bundle>(File.ReadAllText(args[1])); PackageCore.Validate(b);
         string cache=Path.GetDirectoryName(Path.GetFullPath(args[1]));

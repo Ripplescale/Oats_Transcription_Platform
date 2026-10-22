@@ -12,6 +12,29 @@ import configure
 
 
 class BundleTests(unittest.TestCase):
+    def test_embedded_crt_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs, output = root / "inputs", root / "output"
+            (inputs / "msvc").mkdir(parents=True)
+            output.mkdir()
+            verified = {}
+            for name in ["msvcp140_1.dll"] + [f"runtime{i}.dll" for i in range(9)]:
+                data = b"MZ test fixture " + name.encode()
+                (inputs / "msvc" / name).write_bytes(data)
+                verified["msvc/" + name] = {"sha256": hashlib.sha256(data).hexdigest()}
+            (inputs / "verified-inputs.json").write_bytes(builder.encoded({"files": verified}))
+            manifest = {}
+            builder.embed_msvc(manifest, output, inputs)
+            with zipfile.ZipFile(output / "msvc-runtime.zip") as zipped:
+                raw = zipped.read("payload-manifest.json")
+                files = json.loads(raw)["files"]
+                self.assertEqual(len(files), 20)
+                self.assertEqual(manifest["runtime_manifest_sha256"], hashlib.sha256(raw).hexdigest())
+                self.assertEqual(manifest["runtime_bytes"], sum(f["size"] for f in files))
+                for entry in files:
+                    self.assertEqual(hashlib.sha256(zipped.read(entry["path"])).hexdigest(), entry["sha256"])
+
     def test_split_zip64_roundtrip(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)

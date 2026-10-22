@@ -324,12 +324,34 @@ def runtime_file(name):
                                 "env/Lib/site-packages/torch/share/cmake/"))
 
 
+def embed_msvc(manifest, folder, inputs):
+    verified = read(inputs / "verified-inputs.json")["files"]
+    files = []
+    path = folder / "msvc-runtime.zip"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as zipped:
+        for dll in sorted((inputs / "msvc").glob("*.dll")):
+            sha = digest(dll)
+            if verified["msvc/" + dll.name]["sha256"] != sha:
+                raise ValueError("Microsoft redistributable changed: " + dll.name)
+            for prefix in ("python/", "tools/whisper-cpu/"):
+                name = prefix + safe_name(dll.name)
+                zipped.write(dll, name)
+                files.append({"path": name, "size": dll.stat().st_size, "sha256": sha})
+        if len(files) < 20 or not any(f['path'] == 'python/msvcp140_1.dll' for f in files):
+            raise ValueError("Complete Microsoft CRT redistributable is missing")
+        payload = encoded({"schema": 1, "files": files})
+        zipped.writestr("payload-manifest.json", payload)
+    manifest.update(runtime_bytes=sum(f["size"] for f in files), runtime_manifest_sha256=hashlib.sha256(payload).hexdigest())
+    (folder / "bundle.json").write_bytes(encoded(manifest))
+
+
 def compile_setup(manifest, folder):
     framework = Path(os.environ.get("WINDIR", "C:/Windows")) / "Microsoft.NET/Framework64/v4.0.30319"
     args = [str(framework / "csc.exe"), "/nologo", "/target:winexe", "/platform:x64", "/optimize+",
             "/out:" + str(folder / "Oats-Setup.exe"), "/resource:" + str(folder / "bundle.json") + ",bundle.json",
             "/win32icon:" + str(REPO / "frontend/src-tauri/icons/icon.ico")]
     args.append("/win32manifest:" + str(Path(__file__).with_name("setup.manifest")))
+    args.append("/resource:" + str(folder / "msvc-runtime.zip") + ",msvc-runtime.zip")
     for assembly in ("System.Net.Http", "System.Web.Extensions", "System.IO.Compression", "System.IO.Compression.FileSystem", "System.Windows.Forms", "System.Drawing"):
         args.append("/reference:" + str(framework / (assembly + ".dll")))
     args.extend(str(Path(__file__).with_name(name)) for name in ("PackageCore.cs", "Setup.cs"))
@@ -343,6 +365,7 @@ def main():
     parser.add_argument("--inputs", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--id", default=None)
+    parser.add_argument("--reuse-bundle", type=Path, help="Reuse a verified immutable GitHub payload release; rebuild only the small bootstrap")
     args = parser.parse_args()
     identity = args.id or secrets.token_hex(10)
     if not re.fullmatch("[a-f0-9]{20}", identity):
@@ -350,10 +373,19 @@ def main():
     folder = args.output.resolve() / identity
     if folder.exists():
         raise ValueError("Build output already exists; choose a new identity")
-    sources = collect(read(args.runtime), args.python_base, args.inputs)
-    manifest = archive(sources, folder, identity)
+    if args.reuse_bundle:
+        manifest = read(args.reuse_bundle)
+        manifest["payload_id"] = manifest.get("payload_id", manifest["id"])
+        manifest["id"] = identity
+        folder.mkdir(parents=True)
+        file_count = None
+    else:
+        sources = collect(read(args.runtime), args.python_base, args.inputs)
+        manifest = archive(sources, folder, identity)
+        file_count = len(sources)
+    embed_msvc(manifest, folder, args.inputs)
     compile_setup(manifest, folder)
-    print(json.dumps({"bundle_id": identity, "files": len(sources), "download_bytes": sum(p["size"] for p in manifest["parts"]), "installed_bytes": manifest["installed_bytes"]}), flush=True)
+    print(json.dumps({"bundle_id": identity, "files": file_count, "download_bytes": sum(p["size"] for p in manifest["parts"]), "installed_bytes": manifest["installed_bytes"]}), flush=True)
 
 
 if __name__ == "__main__":

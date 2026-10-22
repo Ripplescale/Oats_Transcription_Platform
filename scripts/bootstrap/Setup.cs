@@ -107,13 +107,20 @@ namespace OatsSetup {
                 if (String.IsNullOrWhiteSpace(data)) data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "STTApp");
                 data = Path.GetFullPath(data); PackageCore.NoLinks(data);
                 if (File.Exists(Path.Combine(data, "runtime.json")) || File.Exists(Path.Combine(data, "data-location.json"))) throw new IOException("This PC already has an oats configuration. It was preserved. Use About → Check for updates for this installation; use this complete setup on the new PC.");
-                Space(data, bundle.installed_bytes);
+                Space(data, bundle.installed_bytes + bundle.runtime_bytes);
                 string target = Path.Combine(data, "packages", bundle.id); PackageCore.NoLinks(target);
                 await Task.Run(delegate {
                     using (SplitStream stream = new SplitStream(bundle.parts.Select(a => Path.Combine(cache, a.name))))
                     using (ZipArchive zip = new ZipArchive(stream, ZipArchiveMode.Read)) {
                         Payload p = PackageCore.ReadPayload(zip, bundle);
                         PackageCore.Extract(zip, p, target, x => Report("Preparing verified local speech components…\n" + GiB(x) + " of " + GiB(bundle.installed_bytes), x, bundle.installed_bytes), cancellation.Token);
+                    }
+                    using (Stream runtime = Assembly.GetExecutingAssembly().GetManifestResourceStream("msvc-runtime.zip"))
+                    using (ZipArchive zip = new ZipArchive(runtime, ZipArchiveMode.Read)) {
+                        Bundle embedded = new Bundle { installed_bytes = bundle.runtime_bytes, payload_manifest_sha256 = bundle.runtime_manifest_sha256 };
+                        Payload p = PackageCore.ReadPayload(zip, embedded);
+                        if (p.files.Any(f => !(f.path.StartsWith("python/") || f.path.StartsWith("tools/whisper-cpu/")) || !f.path.EndsWith(".dll"))) throw new IOException("Unexpected Microsoft runtime content.");
+                        PackageCore.Extract(zip, p, target, x => Report("Preparing included Microsoft speech-runtime dependencies…", x, bundle.runtime_bytes), cancellation.Token);
                     }
                 });
                 cancellation.Token.ThrowIfCancellationRequested(); handoff = true; cancel.Enabled = false;
@@ -145,7 +152,9 @@ namespace OatsSetup {
                 using (Mutex owner = new Mutex(true, @"Local\oats-complete-setup", out first)) {
                 if (!first) { MessageBox.Show("oats setup is already open.", "oats setup"); return; }
                 Bundle b; using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("bundle.json")) using (StreamReader reader = new StreamReader(stream)) b = PackageCore.Json.Deserialize<Bundle>(reader.ReadToEnd());
-                PackageCore.Validate(b); Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false); Application.Run(new SetupWindow(b));
+                PackageCore.Validate(b);
+                if (b.runtime_manifest_sha256 == null || b.runtime_bytes < 1) throw new IOException("The complete setup is missing its app-local Microsoft runtime.");
+                Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false); Application.Run(new SetupWindow(b));
                 owner.ReleaseMutex();
                 }
             } catch (Exception error) { MessageBox.Show(error.Message, "oats setup", MessageBoxButtons.OK, MessageBoxIcon.Error); }

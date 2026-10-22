@@ -9,6 +9,13 @@ This is separate from the small app-only updater. Publish a complete bundle with
 a `setup-<20 hex digits>` tag and `--latest=false`. Never give it a `v...` tag,
 replace `latest.json`, or mark it as the latest app release.
 
+The small executable also embeds the full verified app-local Microsoft CRT.
+Extract it before probing Python: ONNX Runtime needs msvcp140_1.dll even when
+that dependency happens to be available system-wide on the development PC.
+An immutable large payload can be reused with `--reuse-bundle <bundle.json>`;
+the new manifest's `payload_id` pins its original GitHub release and part names.
+This permits a corrected small setup release without reuploading the models.
+
 ## Build
 
 Use Windows x64 with Python 3.12.14 and .NET Framework 4.8. The compiler is the

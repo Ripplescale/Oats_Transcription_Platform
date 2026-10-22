@@ -1,6 +1,6 @@
 # Install oats on another Windows PC
 
-Download **Oats-Setup.exe** from the [complete setup release](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/tag/setup-90c87eedfa370799c4da).
+Download **Oats-Setup.exe** from the [complete setup release](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/tag/setup-90c87eedfa370799c4db).
 
 1. Open Oats-Setup.exe and choose a folder for the downloaded components.
 2. Choose **Download and install**. Leave setup open until it finishes.
@@ -10,6 +10,9 @@ The setup downloads everything from GitHub release assets: the oats 0.8.8
 installer, private Python and speech libraries, Trelis and Apex models, the
 speech gate, and the offline Microsoft WebView2 installer. No Python, Git, Node,
 terminal commands or Hugging Face account are needed on the new PC.
+The small setup executable includes the full app-local Microsoft C++ runtime.
+Its large model parts are shared from the immutable GitHub payload release;
+setup follows those pinned links automatically.
 
 The download is about **10.4 GiB**, and the runtime expands to **13.1 GiB**.
 Allow **30 GiB free** when both are on the same drive. Keep the executable and

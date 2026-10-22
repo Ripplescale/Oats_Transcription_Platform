@@ -15,7 +15,9 @@ Fetch 'WebView2.exe' 'https://go.microsoft.com/fwlink/?LinkId=2124701'
 Fetch 'whisper-bin-x64.zip' 'https://github.com/ggml-org/whisper.cpp/releases/download/b5130/whisper-bin-x64.zip'
 Copy-Item -LiteralPath (Join-Path $Redist 'msvcp140.dll') -Destination (Join-Path $Output 'msvcp140.dll')
 $files = @{}
-foreach ($name in @('WebView2.exe', 'msvcp140.dll')) {
+New-Item -ItemType Directory -Force -Path (Join-Path $Output 'msvc') | Out-Null
+foreach ($dll in Get-ChildItem -LiteralPath $Redist -Filter '*.dll' -File) { Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $Output ('msvc/' + $dll.Name)) }
+foreach ($name in @('WebView2.exe', 'msvcp140.dll') + @(Get-ChildItem -LiteralPath (Join-Path $Output 'msvc') -Filter '*.dll' -File | ForEach-Object { 'msvc/' + $_.Name })) {
     $path = Join-Path $Output $name
     $signature = Get-AuthenticodeSignature -LiteralPath $path
     if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation,') { throw "Microsoft signature verification failed for $name" }

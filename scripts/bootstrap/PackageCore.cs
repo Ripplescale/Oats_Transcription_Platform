@@ -14,7 +14,8 @@ using System.Web.Script.Serialization;
 namespace OatsSetup {
     public sealed class Asset { public string name; public string url; public long size; public string sha256; }
     public sealed class Bundle {
-        public int schema; public string id; public string app_version; public string payload_manifest_sha256;
+        public int schema; public string id; public string payload_id; public string app_version; public string payload_manifest_sha256;
+        public string runtime_manifest_sha256; public long runtime_bytes;
         public long installed_bytes; public Asset[] parts;
     }
     public sealed class PayloadFile { public string path; public long size; public string sha256; }
@@ -51,10 +52,13 @@ namespace OatsSetup {
             if (b == null || b.schema != 1 || !Regex.IsMatch(b.id ?? "", "^[a-f0-9]{20}$") || !Regex.IsMatch(b.app_version ?? "", "^0\\.[0-9]+\\.[0-9]+$") || !HashPattern.IsMatch(b.payload_manifest_sha256 ?? "") || b.parts == null || b.parts.Length < 1 || b.parts.Length > 64 || b.installed_bytes < 1)
                 throw new IOException("Invalid setup manifest.");
             HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string payloadId = b.payload_id ?? b.id;
+            if (!Regex.IsMatch(payloadId, "^[a-f0-9]{20}$")) throw new IOException("Invalid payload release identity.");
+            if (b.runtime_manifest_sha256 != null && (!HashPattern.IsMatch(b.runtime_manifest_sha256) || b.runtime_bytes < 1 || b.runtime_bytes > 32L * 1024 * 1024)) throw new IOException("Invalid Microsoft runtime manifest.");
             for (int i = 0; i < b.parts.Length; i++) {
                 Asset a = b.parts[i];
-                if (a == null || a.name != "oats-runtime-" + b.id + ".zip.part" + (i + 1).ToString("000") || !names.Add(a.name) || a.size < 1 || a.size > MaxPart || !HashPattern.IsMatch(a.sha256 ?? "")) throw new IOException("Invalid setup part.");
-                string expected = "https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-" + b.id + "/" + a.name;
+                if (a == null || a.name != "oats-runtime-" + payloadId + ".zip.part" + (i + 1).ToString("000") || !names.Add(a.name) || a.size < 1 || a.size > MaxPart || !HashPattern.IsMatch(a.sha256 ?? "")) throw new IOException("Invalid setup part.");
+                string expected = "https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-" + payloadId + "/" + a.name;
                 if (a.url != expected) throw new IOException("Unexpected setup download address.");
             }
         }
