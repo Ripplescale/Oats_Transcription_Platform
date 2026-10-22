@@ -1,6 +1,6 @@
 # Windows setup for oats
 
-oats is currently a Windows x64 application with a separately prepared local model runtime. **The existing installer is for the already configured laptop.** It does not yet provide a complete, tested first-run installation on an arbitrary PC. This guide separates that installation from the developer setup needed elsewhere.
+For a new Windows x64 PC, use **[the complete setup](COMPLETE_SETUP.md)**: one Oats-Setup.exe downloads the app, private Python, speech libraries and models from GitHub. It can also save a complete folder for offline installation. Hardware and clean-PC validation limits are listed there. The remaining instructions on this page cover existing installations and developer setup.
 
 ## Using an existing installation
 
@@ -20,7 +20,7 @@ Trelis live text may lag or be incomplete. Its raw output and checkpoint remain 
 
 One heavy worker runs at a time. Back-to-back calls keep recording while earlier work finishes; a delayed Trelis job can still use all saved audio. Pausing a worker does not stop capture. After choosing Apex fallback, Trelis stays paused until you explicitly retry it after Apex has finished or paused. Existing legacy versions, including the older two-pass workflow, remain unchanged.
 
-This unsigned local installer does not use Meetily's upstream updater. The new default requires a verified OpenVINO GPU runtime; the older CPU configuration is not a qualified live configuration. Optional speaker setup is described below.
+Public oats app releases use oats' own signed update feed, with separate approval to download and install. Local developer installers and detached updater signatures are distinct from Windows Authenticode publisher signing. The default live Trelis profile requires a verified OpenVINO GPU runtime; CPU configuration is not qualified for live use. Optional speaker setup is described below.
 
 ## Developer prerequisites
 

@@ -27,7 +27,9 @@ oats is a local Windows desktop app for recording calls, keeping the audio, and 
 
 ## Get started
 
-Read **[Windows setup](docs/SETUP.md)** for the existing installation and developer setup path. **[How it works](docs/HOW_IT_WORKS.md)** explains capture, models, revisions, retries, and storage. **[Privacy](PRIVACY_POLICY.md)** describes local processing and manual export.
+For a new Windows PC, download **[Oats-Setup.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4da/Oats-Setup.exe)** and choose **Download and install**. It fetches all components from GitHub. Choose **Save for offline setup** to keep a complete folder you can copy to another PC. The download is about **10.4 GiB**; allow **30 GiB free** when keeping the downloaded parts and installed runtime on the same drive. See **[complete setup and hardware requirements](docs/COMPLETE_SETUP.md)**.
+
+Existing users should use the app's update notification or **About → Check for updates**. Read **[Windows setup](docs/SETUP.md)** for developer setup. **[How it works](docs/HOW_IT_WORKS.md)** explains capture, models, revisions, retries, and storage. **[Privacy](PRIVACY_POLICY.md)** describes local processing and manual export.
 
 See [oats 0.7.4 release notes](docs/releases/0.7.4.md) for speech recovery, chat bubbles, and the paired desktop/worker update.
 
@@ -41,7 +43,7 @@ Outlook calendar sync and automatically generated pre-meeting recaps are not ena
 
 The integrated GPU adapter reproduced **23/23 CPU chunk outputs over 400.15 seconds** of development audio. The earlier acceleration experiment measured **8.14× faster** processing on a matched warm subset. A five-minute replay through the actual worker completed **30/30 windows across two saved-audio streams**, preserving raw output and finishing about **16 seconds after input stopped**. It **missed the strict latency gate**: first text took about 50 seconds; the 95th-percentile delay was about 30 seconds after a window ended. These results came from an Intel Ultra 7 268V / Arc 140V laptop. They do not qualify physical capture, a concurrent calling application, or 90-minute performance. See [timing and validation details](docs/HOW_IT_WORKS.md#models-and-timing).
 
-This is an early Windows implementation. The installer currently reuses model files and isolated Python environments already prepared on the same laptop; it is not a complete model bundle for an unconfigured computer. Clean-machine installation and broad hardware qualification remain work to do. The repository does not contain private recordings, benchmark references, model weights, or credentials.
+This is an early Windows implementation. The small app-update installer reuses prepared speech models and Python; the separate complete setup bundles those dependencies for a new PC. Hands-on clean-machine acceptance and broad hardware qualification remain work to do. Optional gated speaker identification is not included in the complete setup. The source repository does not contain private recordings, benchmark references, model weights, or credentials; redistributable speech models are hosted separately as GitHub release assets.
 
 The 10-second default is not a universal accuracy optimum. Names, numbers, units, overlap, and quiet input can still be wrong. Automatic flags and retries help find some failures; they do not prove completeness. Two-hour calls, headset reconnects, and live speaker recognition are not yet fully qualified. Screen video and shared workspaces are outside the current scope.
 
