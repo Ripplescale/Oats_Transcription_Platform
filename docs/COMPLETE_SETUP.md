@@ -1,6 +1,6 @@
 # Install oats on another Windows PC
 
-Download **Oats-Setup.exe** from the [complete setup release](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/tag/setup-90c87eedfa370799c4db).
+Download **Oats-Setup.exe** from the [complete setup release](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/tag/setup-90c87eedfa370799c4dc).
 
 1. Open Oats-Setup.exe and choose a folder for the downloaded components.
 2. Choose **Download and install**. Leave setup open until it finishes.
@@ -29,6 +29,23 @@ to the destination PC. Open Oats-Setup.exe there and choose **Download and
 install**. When all parts are present and verified, it installs from that folder
 without fetching anything else.
 
+## Repair an existing installation where both models fail
+
+Complete setup builds before 2026-10-28 omitted the empty Trelis cache and Apex
+working directories. The model files could pass validation while both actual
+adapters refused to start with `cache_dir_missing` or `work_dir_missing`.
+
+1. Download [Oats-Repair.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4dc/Oats-Repair.exe).
+2. Open it and choose **Check / repair folders**. You can leave oats open.
+3. In oats, open **Tools → Transcription & versions** and resume/retry the failed
+   transcription using its saved recording.
+
+The repair creates and checks only the two configured package work folders.
+It does not download models, reinstall the app, change runtime configuration or
+checkpoints, remove compiled cache files, or replace recordings and notes. If a
+problem remains after retrying, run the repair check again and use **Copy report**
+to share the recent worker error messages and setup paths. Recording files are
+not included in that report.
 ## Compatible PCs
 
 This package targets Windows x64, with Windows 11 recommended. Windows ARM and

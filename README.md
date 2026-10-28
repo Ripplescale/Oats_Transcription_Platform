@@ -27,7 +27,9 @@ oats is a local Windows desktop app for recording calls, keeping the audio, and 
 
 ## Get started
 
-For a new Windows PC, download **[Oats-Setup.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4db/Oats-Setup.exe)** and choose **Download and install**. It fetches all components from GitHub. Choose **Save for offline setup** to keep a complete folder you can copy to another PC. The download is about **10.4 GiB**; allow **30 GiB free** when keeping the downloaded parts and installed runtime on the same drive. See **[complete setup and hardware requirements](docs/COMPLETE_SETUP.md)**.
+For a new Windows PC, download **[Oats-Setup.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4dc/Oats-Setup.exe)** and choose **Download and install**. It fetches all components from GitHub. Choose **Save for offline setup** to keep a complete folder you can copy to another PC. The download is about **10.4 GiB**; allow **30 GiB free** when keeping the downloaded parts and installed runtime on the same drive. See **[complete setup and hardware requirements](docs/COMPLETE_SETUP.md)**.
+
+If a complete installation shows “needs attention” for both Trelis and Apex, run **[Oats-Repair.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4dc/Oats-Repair.exe)**, choose **Check / repair folders**, then retry the saved transcription. Earlier setup builds omitted two required working directories. No model download or app reinstallation is needed.
 
 Existing users should use the app's update notification or **About → Check for updates**. Read **[Windows setup](docs/SETUP.md)** for developer setup. **[How it works](docs/HOW_IT_WORKS.md)** explains capture, models, revisions, retries, and storage. **[Privacy](PRIVACY_POLICY.md)** describes local processing and manual export.
 

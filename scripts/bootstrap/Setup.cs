@@ -123,6 +123,9 @@ namespace OatsSetup {
                         PackageCore.Extract(zip, p, target, x => Report("Preparing included Microsoft speech-runtime dependencies…", x, bundle.runtime_bytes), cancellation.Token);
                     }
                 });
+                // These empty writable directories are not archive files.
+                // Both actual adapters refuse to start if setup omits them.
+                RuntimeDirectories.Ensure(target);
                 cancellation.Token.ThrowIfCancellationRequested(); handoff = true; cancel.Enabled = false;
                 string python = Path.Combine(target, @"python\python.exe"); string configure = Path.Combine(target, @"setup\configure.py");
                 Report("Checking Python, speech libraries, and available hardware…", 0, 1);

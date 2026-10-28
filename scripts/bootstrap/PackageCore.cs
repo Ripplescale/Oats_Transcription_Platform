@@ -159,6 +159,37 @@ namespace OatsSetup {
             }
         }
     }
+    public static class RuntimeDirectories {
+        public static string PackageFromConfig(string root, Dictionary<string, object> config) {
+            object modelsValue, trelisValue, apexValue, cacheValue, workValue;
+            if (!config.TryGetValue("models", out modelsValue)) throw new IOException("Speech model configuration is missing.");
+            var models = modelsValue as Dictionary<string, object>;
+            if (models == null || !models.TryGetValue("trelis", out trelisValue) || !models.TryGetValue("apex", out apexValue)) throw new IOException("Trelis or Apex configuration is missing.");
+            var trelis = trelisValue as Dictionary<string, object>; var apex = apexValue as Dictionary<string, object>;
+            if (trelis == null || apex == null || !trelis.TryGetValue("cache_dir", out cacheValue) || !apex.TryGetValue("work_dir", out workValue) || !(cacheValue is string) || !(workValue is string)) throw new IOException("This repair requires the complete-setup cache and workspace paths.");
+            string cache = Path.GetFullPath((string)cacheValue), work = Path.GetFullPath((string)workValue);
+            string package = Path.GetDirectoryName(Path.GetDirectoryName(cache));
+            if (!String.Equals(Path.GetDirectoryName(package), Path.Combine(Path.GetFullPath(root), "packages"), StringComparison.OrdinalIgnoreCase)
+                || !Regex.IsMatch(Path.GetFileName(package), "^[a-f0-9]{20}$")
+                || !String.Equals(cache, Path.Combine(package, @"cache\openvino"), StringComparison.OrdinalIgnoreCase)
+                || !String.Equals(work, Path.Combine(package, @"cache\apex"), StringComparison.OrdinalIgnoreCase)) throw new IOException("The configured working folders do not belong to a complete oats setup. Nothing was changed.");
+            PackageCore.NoLinks(package); return package;
+        }
+        public static string[] Ensure(string package) {
+            package = Path.GetFullPath(package); PackageCore.NoLinks(package);
+            if (!Directory.Exists(package)) throw new IOException("The installed speech package is missing. Nothing was changed.");
+            string[] paths = { Path.Combine(package, @"cache\openvino"), Path.Combine(package, @"cache\apex") };
+            // Check both destinations before making either one. Never remove a
+            // conflicting file, follow a junction or change runtime snapshots.
+            foreach (string path in paths) { PackageCore.NoLinks(path); if (File.Exists(path)) throw new IOException("A file occupies a required work-folder path; it was preserved: " + path); }
+            foreach (string path in paths) {
+                Directory.CreateDirectory(PackageCore.LongPath(path)); PackageCore.NoLinks(path);
+                string probe = PackageCore.LongPath(Path.Combine(path, ".oats-write-check-" + Guid.NewGuid().ToString("N")));
+                using (FileStream owned = new FileStream(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose)) owned.WriteByte(0);
+            }
+            return paths;
+        }
+    }
     // ZIP64 can seek directly over the downloaded parts; no extra joined archive
     // or multi-gigabyte memory allocation is needed during offline extraction.
     public sealed class SplitStream : Stream {

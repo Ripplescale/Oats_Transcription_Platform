@@ -1,10 +1,10 @@
 #requires -Version 7.0
-param([Parameter(Mandatory)][string]$BundleDirectory, [string]$IdentityRoot = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'oats-release-signing'))
+param([Parameter(Mandatory)][string]$BundleDirectory, [ValidateSet('Oats-Setup.exe','Oats-Repair.exe')][string]$ArtifactName = 'Oats-Setup.exe', [string]$IdentityRoot = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'oats-release-signing'))
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repository = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $directory = (Resolve-Path -LiteralPath $BundleDirectory).Path
-$installer = Join-Path $directory 'Oats-Setup.exe'
+$installer = Join-Path $directory $ArtifactName
 $public = Join-Path $IdentityRoot 'oats-updater.key.pub'
 $key = Join-Path $IdentityRoot 'oats-updater.key'
 $protected = Join-Path $IdentityRoot 'password.dpapi'

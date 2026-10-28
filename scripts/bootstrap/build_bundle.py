@@ -356,6 +356,9 @@ def compile_setup(manifest, folder):
         args.append("/reference:" + str(framework / (assembly + ".dll")))
     args.extend(str(Path(__file__).with_name(name)) for name in ("PackageCore.cs", "Setup.cs"))
     subprocess.run(args, check=True)
+    repair_args = [arg for arg in args if not arg.startswith(("/out:", "/resource:")) and not arg.endswith(".cs")]
+    repair_args.extend(["/out:" + str(folder / "Oats-Repair.exe"), str(Path(__file__).with_name("PackageCore.cs")), str(Path(__file__).with_name("Repair.cs"))])
+    subprocess.run(repair_args, check=True)
 
 
 def main():

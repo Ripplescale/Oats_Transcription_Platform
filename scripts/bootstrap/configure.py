@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import stat
 import sys
 import tempfile
 import venv
@@ -105,6 +106,7 @@ def prepare(bundle, device):
         config["models"]["trelis"].pop("export_path", None)
     elif device != "GPU":
         raise ValueError("Choose GPU or explicitly accepted CPU mode")
+    ensure_working_directories(config, bundle)
     python = bundle / "env/Scripts/python.exe"
     worker = bundle / "worker"
     # Validate the same model manifests, conversion receipts, and gate hashes
@@ -134,6 +136,35 @@ def prepare(bundle, device):
         config_path.unlink()
     write_new(config_path, config)
     return config
+
+
+def ensure_working_directories(config, bundle):
+    """Provision transient outputs, not model assets or existing checkpoints."""
+    paths = []
+    for model, key, leaf in (("trelis", "cache_dir", "openvino"), ("apex", "work_dir", "apex")):
+        value = config["models"][model].get(key)
+        if value is None and model == "trelis" and config["models"][model].get("backend") != "openvino":
+            continue
+        target = Path(value) if isinstance(value, str) else None
+        expected = bundle / "cache" / leaf
+        if target is None or not target.is_absolute() or target != expected:
+            raise ValueError("Unexpected packaged working directory for " + model)
+        for item in (target, *target.parents):
+            try:
+                metadata = item.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & 0x400:
+                raise ValueError("Linked working directories are not supported")
+        if target.exists() and not target.is_dir():
+            raise ValueError("A file occupies a working-directory path; it was preserved")
+        paths.append(target)
+    for target in paths:
+        target.mkdir(parents=True, exist_ok=True)
+        descriptor, probe = tempfile.mkstemp(prefix=".oats-write-check-", dir=target)
+        os.close(descriptor)
+        os.unlink(probe)
+    return paths
 
 
 def activate(bundle, root):

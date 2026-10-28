@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 import build_bundle as builder
@@ -12,6 +13,41 @@ import configure
 
 
 class BundleTests(unittest.TestCase):
+    def test_work_directories_preserve_existing_files_and_reject_other_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory).resolve()
+            config = {"models": {"trelis": {"backend": "openvino", "cache_dir": str(bundle / "cache/openvino")},
+                                 "apex": {"work_dir": str(bundle / "cache/apex")}}}
+            configure.ensure_working_directories(config, bundle)
+            sentinel = bundle / "cache/openvino/existing-cache"
+            sentinel.write_bytes(b"preserved")
+            configure.ensure_working_directories(config, bundle)
+            self.assertEqual(sentinel.read_bytes(), b"preserved")
+            config["models"]["apex"]["work_dir"] = str(bundle / "recordings")
+            with self.assertRaises(ValueError):
+                configure.ensure_working_directories(config, bundle)
+            self.assertFalse((bundle / "recordings").exists())
+
+    def test_prepare_creates_backend_work_directories_before_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory).resolve()
+            (bundle / "setup").mkdir()
+            gate = bundle / "gate.onnx"
+            gate.write_bytes(b"synthetic gate")
+            template = {"models": {
+                "trelis": {"backend": "openvino", "cache_dir": "@PACKAGE@/cache/openvino", "export_path": "@PACKAGE@/models/export"},
+                "apex": {"backend": "whisper_cpp", "work_dir": "@PACKAGE@/cache/apex"}},
+                "speech_gate": {"model_path": "@PACKAGE@/gate.onnx", "model_sha256": builder.digest(gate)}}
+            (bundle / "setup/runtime-template.json").write_bytes(builder.encoded(template))
+            def check_before_model_validation(*args):
+                self.assertTrue((bundle / "cache/openvino").is_dir(), "Trelis cache missing on fresh setup")
+                self.assertTrue((bundle / "cache/apex").is_dir(), "Apex workspace missing on fresh setup")
+                return "verified"
+            with patch.object(configure, "isolated", side_effect=check_before_model_validation):
+                configure.prepare(bundle, "GPU")
+            self.assertEqual(list((bundle / "cache/apex").iterdir()), [])
+            self.assertEqual(list((bundle / "cache/openvino").iterdir()), [])
+
     def test_embedded_crt_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

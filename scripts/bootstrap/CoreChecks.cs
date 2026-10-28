@@ -62,11 +62,32 @@ public static class CoreChecks {
         foreach(string name in new[]{"../escape","C:/escape","python/CON.txt","python/a\\b","python/trailing. ","/root","python//x"}) Reject(()=>PackageCore.Relative(name),name);
         Downloads(folder);
         Archives(folder);
+        WorkingDirectories(folder);
         Bundle b=new Bundle {schema=1,id=new string('a',20),payload_id=new string('b',20),app_version="0.8.8",installed_bytes=1,payload_manifest_sha256=new string('0',64),parts=new[]{new Asset {name="oats-runtime-"+new string('b',20)+".zip.part001",url="https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-"+new string('b',20)+"/oats-runtime-"+new string('b',20)+".zip.part001",size=1,sha256=new string('0',64)}}};
         PackageCore.Validate(b); checks++;
         b.parts[0].url="https://example.com/part"; Reject(()=>PackageCore.Validate(b),"non-GitHub linked payload");
         b.payload_id="../invalid"; Reject(()=>PackageCore.Validate(b),"unsafe linked release identity");
         Console.WriteLine(checks + " transport and path checks passed");
+    }
+    static void WorkingDirectories(string folder) {
+        string root=Path.Combine(folder,"installed"), package=Path.Combine(root,"packages",new string('e',20)); Directory.CreateDirectory(package);
+        var models=new System.Collections.Generic.Dictionary<string,object> {
+            {"trelis",new System.Collections.Generic.Dictionary<string,object>{{"cache_dir",Path.Combine(package,@"cache\openvino")}}},
+            {"apex",new System.Collections.Generic.Dictionary<string,object>{{"work_dir",Path.Combine(package,@"cache\apex")}}}};
+        var config=new System.Collections.Generic.Dictionary<string,object>{{"models",models}};
+        string document=Path.Combine(root,"runtime.json"); File.WriteAllText(document,PackageCore.Json.Serialize(config)); string before=PackageCore.HashFile(document);
+        Check(RuntimeDirectories.PackageFromConfig(root,config)==package,"repair finds package from installed configuration");
+        string[] ready=RuntimeDirectories.Ensure(package);
+        Check(ready.All(Directory.Exists),"fresh install provisions both backend directories");
+        Check(ready.All(p=>Directory.GetFileSystemEntries(p).Length==0),"writability probes leave no files");
+        string preserved=Path.Combine(ready[0],"existing-cache"); File.WriteAllText(preserved,"keep compiled cache");
+        RuntimeDirectories.Ensure(package);
+        Check(File.ReadAllText(preserved)=="keep compiled cache" && PackageCore.HashFile(document)==before,"repair preserves cache contents and exact runtime bytes");
+        var apex=(System.Collections.Generic.Dictionary<string,object>)models["apex"]; apex["work_dir"]=Path.Combine(root,"recordings");
+        Reject(()=>RuntimeDirectories.PackageFromConfig(root,config),"working path outside package cache");
+        string blocked=Path.Combine(root,"packages",new string('d',20)); Directory.CreateDirectory(Path.Combine(blocked,"cache")); File.WriteAllText(Path.Combine(blocked,@"cache\apex"),"preserve conflicting file");
+        Reject(()=>RuntimeDirectories.Ensure(blocked),"conflicting work-directory file");
+        Check(!Directory.Exists(Path.Combine(blocked,@"cache\openvino")) && File.ReadAllText(Path.Combine(blocked,@"cache\apex"))=="preserve conflicting file","repair checks both paths before writing");
     }
     static void Archives(string folder) {
         byte[] data=Encoding.UTF8.GetBytes("verified fixture content");
