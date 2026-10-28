@@ -26,6 +26,7 @@ export class UpdateService {
   private acting = false;
   private listeners = new Set<(snapshot: UpdateInfo) => void>();
   private lastCheckTime = 0;
+  private lastOpenCheckTime = 0;
   constructor(private call: Invoke = invoke, private prepare = prepareForUpdateInstall, private now = Date.now) {}
 
   subscribe(listener: (snapshot: UpdateInfo) => void): () => void {
@@ -47,6 +48,16 @@ export class UpdateService {
     try { checked = Math.max(checked, Number(window.localStorage.getItem(CHECK_KEY)) || 0); } catch {}
     const elapsed = this.now() - checked;
     return checked > 0 && elapsed >= 0 && elapsed < CHECK_INTERVAL_MS;
+  }
+  /** Each new app process checks again; repeated focus events share a short
+   * in-memory debounce rather than yesterday's persisted background throttle. */
+  async checkOnOpen(): Promise<UpdateInfo> {
+    const elapsed = this.now() - this.lastOpenCheckTime;
+    if (this.lastOpenCheckTime > 0 && elapsed >= 0 && elapsed < 60_000) {
+      return this.current ?? this.getStatus();
+    }
+    this.lastOpenCheckTime = this.now();
+    return this.checkForUpdates(true);
   }
   async checkForUpdates(force = false): Promise<UpdateInfo> {
     if (this.checking) return this.checking;

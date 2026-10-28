@@ -175,6 +175,7 @@ fn runtime(app: &tauri::AppHandle) -> Result<Runtime, String> {
     else { root.join("runtime.json") };
     let config: Value = serde_json::from_slice(&fs::read(path).map_err(|_| "Set up the local speech runtime before dictating.")?).map_err(|_| "The local speech runtime configuration could not be read.")?;
     let selected = engine::backend(&config)?;
+    if selected == "trelis" { crate::local_transcription::prepare_model_working_directory(&config, "trelis")?; }
     let keys: &[&str] = if selected == "faster_whisper" { &["python_executable"] }
         else { &["python_executable", "worker_script", "registry_path"] };
     for key in keys {

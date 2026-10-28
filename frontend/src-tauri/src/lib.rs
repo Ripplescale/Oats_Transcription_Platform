@@ -59,6 +59,7 @@ pub mod tray;
 mod meeting_detection;
 mod dictation;
 mod updates;
+mod runtime_workdirs;
 pub mod utils;
 pub mod whisper_engine;
 #[cfg(target_os = "windows")]

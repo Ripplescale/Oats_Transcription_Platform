@@ -13,9 +13,10 @@ function fixture() {
   const values = new Map();
   const localStorage = { get length() { return values.size; }, key: n => [...values.keys()][n] ?? null,
     getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
-  const state = { values, localStorage, now: 100_000, calls: [], prepares: 0, listeners: {}, timers: [], status: available(), fail: null, block: false };
+  const state = { values, localStorage, now: 100_000, calls: [], prepares: 0, listeners: {}, browserListeners: {}, timers: [], status: available(), fail: null, block: false };
   const browser = { localStorage, setTimeout: cb => { state.timers.push(cb); return state.timers.length; }, clearTimeout() {},
-    setInterval: () => 1, clearInterval() {}, addEventListener() {}, removeEventListener() {} };
+    setInterval: () => 1, clearInterval() {}, addEventListener(name, callback) { state.browserListeners[name] = callback; },
+    removeEventListener(name, callback) { if (state.browserListeners[name] === callback) delete state.browserListeners[name]; } };
   function load(file, mocks = {}) {
     const scope = { exports: {}, require: name => mocks[name] ?? require(name), console, window: browser };
     vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, '../../src', file), 'utf8'), {
@@ -57,6 +58,21 @@ test('failed checks can retry and null legacy responses become explicitly unconf
   f.fail = null; f.status = null;
   assert.equal((await f.service.getStatus()).state, 'unconfigured');
   assert.equal((await f.service.checkForUpdates()).state, 'unconfigured');
+});
+
+test('a fresh app session checks despite a recent persisted background check', async () => {
+  const f = fixture();
+  await f.service.checkForUpdates();
+  const restarted = new f.Service(f.call, async () => {}, () => f.now);
+  assert.equal(restarted.wasCheckedRecently(), true);
+  await restarted.checkOnOpen();
+  assert.equal(f.calls.filter(x => x.command === 'updates_check').length, 2);
+  await restarted.checkOnOpen();
+  assert.equal(f.calls.filter(x => x.command === 'updates_check').length, 2);
+  f.now += 60_001;
+  await restarted.checkOnOpen();
+  assert.equal(f.calls.filter(x => x.command === 'updates_check').length, 3);
+  assert.ok(f.calls.every(x => x.command === 'updates_check'));
 });
 
 test('concurrent checks share one metadata request', async () => {
@@ -121,10 +137,16 @@ test('provider startup and notification perform metadata-only checks; details ne
   await act(async () => { f.timers[0](); await flush(); });
   assert.deepEqual(f.calls.map(x => x.command), ['updates_status', 'updates_check']);
   assert.equal(notifications.length, 1);
+  await act(async () => { f.browserListeners.focus(); await flush(); });
+  assert.equal(f.calls.filter(x => x.command === 'updates_check').length, 1);
+  f.now += 60_001;
+  await act(async () => { f.browserListeners.focus(); await flush(); });
+  assert.equal(f.calls.filter(x => x.command === 'updates_check').length, 2);
   await act(async () => { notifications[0][1](); await flush(); });
   assert.equal(renderer.root.findByType(Dialog).props.open, true);
   assert.ok(f.calls.every(x => x.command === 'updates_status' || x.command === 'updates_check'));
   await act(async () => { renderer.unmount(); }); assert.equal(stopCount, 1);
+  assert.deepEqual(Object.keys(f.browserListeners), []);
 });
 
 test('install preflight keeps dialog modal and non-dismissible until failure, without losing staged state', async () => {

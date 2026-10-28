@@ -31,6 +31,11 @@ without fetching anything else.
 
 ## Repair an existing installation where both models fail
 
+With oats **0.8.9 or later**, **About → Check for updates** provides an app-only
+fix: the app prepares the missing package work folders before a transcription
+starts or resumes. After updating, retry the saved transcription. The small
+standalone repair below is also available without updating the app.
+
 Complete setup builds before 2026-10-28 omitted the empty Trelis cache and Apex
 working directories. The model files could pass validation while both actual
 adapters refused to start with `cache_dir_missing` or `work_dir_missing`.

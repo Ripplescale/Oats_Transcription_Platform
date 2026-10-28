@@ -206,6 +206,17 @@ fn launch(id: &str) -> Result<(), String> {
     launch_process(WorkerKind::Transcription, id, &snapshot, &dir)
 }
 
+pub(crate) fn prepare_model_working_directory(config: &Value, model: &str) -> Result<(), String> {
+    let runtime = &config["models"][model];
+    let (key, leaf) = match runtime["backend"].as_str() {
+        Some("openvino") => ("cache_dir", "openvino"),
+        Some("whisper_cpp") => ("work_dir", "apex"),
+        _ => return Ok(()),
+    };
+    let path = runtime[key].as_str().ok_or("The local speech working folder is not configured")?;
+    crate::runtime_workdirs::ensure(&data_root()?, Path::new(path), leaf)
+}
+
 fn validate_asr_runtime(config: &Value) -> Result<(), String> {
     for key in ["python_executable", "worker_script", "registry_path"] {
         let value = config[key].as_str().filter(|value| !value.trim().is_empty())
@@ -293,6 +304,11 @@ fn launch_process(kind: WorkerKind, id: &str, config_file: &Path, dir: &Path) ->
         crate::audio::source_archive::restore(&session).map_err(|e|e.to_string())?;
     }
     let config = read(config_file)?;
+    if kind == WorkerKind::Transcription {
+        let profile = request["profile"].as_str().ok_or("Missing transcription profile")?;
+        let (model, _) = profile_parts(profile)?;
+        prepare_model_working_directory(&config, model)?;
+    }
     let python = config["python_executable"].as_str().ok_or("Missing local Python")?;
     let script = config["worker_script"].as_str().ok_or("Missing local worker")?;
     let log = fs::OpenOptions::new().create(true).append(true).open(dir.join("worker.log")).map_err(|e| e.to_string())?;
