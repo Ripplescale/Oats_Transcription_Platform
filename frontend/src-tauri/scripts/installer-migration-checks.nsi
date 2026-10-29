@@ -7,7 +7,7 @@ OutFile "${CHECK_OUTPUT}"
 !include FileFunc.nsh
 !include WordFunc.nsh
 !include Win\COM.nsh
-!define VERSION "0.8.11"
+!define VERSION "0.8.12"
 !define OATS_RECORDS_ROOT "Software\OatsInstallerFixture\${FIXTURE_ID}"
 !include "oats-install-migration.nsh"
 Var FixtureRoot
@@ -32,6 +32,7 @@ Section
   CreateDirectory "$FixtureRoot\old app"
   CreateDirectory "$FixtureRoot\current app"
   CreateDirectory "$FixtureRoot\foreign"
+  CreateDirectory "$FixtureRoot\newer"
   CreateDirectory "$FixtureRoot\legacy"
   CreateDirectory "$FixtureRoot\missing uninstaller"
   SetOutPath "$FixtureRoot\old app"
@@ -42,6 +43,8 @@ Section
   File /oname=xx.exe "${FIXTURE_INPUT}\legacy.exe"
   SetOutPath "$FixtureRoot\foreign"
   File /oname=xx.exe "${FIXTURE_INPUT}\foreign.exe"
+  SetOutPath "$FixtureRoot\newer"
+  File /oname=xx.exe "${FIXTURE_INPUT}\newer.exe"
   SetOutPath "$FixtureRoot\missing uninstaller"
   File /oname=xx.exe "${FIXTURE_INPUT}\old.exe"
   FileOpen $0 "$FixtureRoot\old app\uninstall.exe" w
@@ -51,6 +54,8 @@ Section
   FileOpen $0 "$FixtureRoot\legacy\uninstall.exe" w
   FileClose $0
   FileOpen $0 "$FixtureRoot\foreign\uninstall.exe" w
+  FileClose $0
+  FileOpen $0 "$FixtureRoot\newer\uninstall.exe" w
   FileClose $0
   FileOpen $0 "$FixtureRoot\old app\notes-sentinel.txt" w
   FileWrite $0 "Keep my notes and recordings"
@@ -113,6 +118,11 @@ Section
   Call OatsRepairOneShortcut
   Call OatsReadShortcut
   !insertmacro CheckEqual $OatsTarget "$FixtureRoot\foreign\xx.exe" "unrelated shortcut preserved"
+  StrCpy $OatsLink "$FixtureRoot\newer.lnk"
+  CreateShortcut "$OatsLink" "$FixtureRoot\newer\xx.exe"
+  Call OatsRepairOneShortcut
+  Call OatsReadShortcut
+  !insertmacro CheckEqual $OatsTarget "$FixtureRoot\newer\xx.exe" "newer version shortcut preserved"
   StrCpy $OatsLink "$FixtureRoot\broken.lnk"
   CreateShortcut "$OatsLink" "$FixtureRoot\missing\xx.exe"
   Call OatsRepairOneShortcut
