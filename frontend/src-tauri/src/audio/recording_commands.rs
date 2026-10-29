@@ -37,12 +37,33 @@ pub use super::transcription::TranscriptUpdate;
 static IS_RECORDING: AtomicBool = AtomicBool::new(false);
 pub(crate) static CAPTURE_START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// True for the whole `stop_recording` tail (manager taken -> `recording-stopped`
-/// emitted). `IS_RECORDING` must stay true through the tail — the frontend polls
-/// it to keep the stop UI up — so the mic-disconnect fallback checks this flag
-/// too, otherwise a fallback queued before Stop retries against a taken manager
-/// and surfaces a spurious "Microphone fallback failed" toast.
+/// Owned teardown remains quarantined after a caller's deadline expires.
+/// Callback capture can already be stopped while devices/writer still release.
 static IS_RECORDING_STOPPING: AtomicBool = AtomicBool::new(false);
+static STOP_TASK: Mutex<Option<tokio::sync::watch::Sender<super::recording_shutdown::Completion>>> = Mutex::new(None);
+static LAST_RECORDING_ERROR: Mutex<Option<String>> = Mutex::new(None);
+static LAST_CAPTURE: Mutex<Option<super::durable_capture::CaptureInfo>> = Mutex::new(None);
+static LAST_DURATION: Mutex<Option<f64>> = Mutex::new(None);
+static LAST_STOP_FAILED: AtomicBool = AtomicBool::new(false);
+static STOP_DEADLINE_EXPIRED: AtomicBool = AtomicBool::new(false);
+static CAPTURE_RECOVERY_RESTART: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn recovery_restart_requested() -> bool { CAPTURE_RECOVERY_RESTART.load(Ordering::SeqCst) }
+
+/// Called only by the explicit recovery action after the frontend saves notes
+/// and confirms that the unfinished audio tail may be lost. Ordinary Quit and
+/// timed-out Finish never force an exit.
+#[tauri::command]
+pub async fn restart_after_capture_failure<R: Runtime>(app:AppHandle<R>) -> Result<(),String> {
+    let guard = CAPTURE_START_LOCK.lock().await;
+    if !IS_RECORDING_STOPPING.load(Ordering::SeqCst) || !STOP_DEADLINE_EXPIRED.load(Ordering::SeqCst) {
+        return Err("A recovery restart is available only after recording shutdown has exceeded its deadline.".into());
+    }
+    CAPTURE_RECOVERY_RESTART.store(true,Ordering::SeqCst);
+    drop(guard);
+    app.request_restart();
+    Ok(())
+}
 
 /// Recording is live and not being torn down — the only state in which the
 /// mic-disconnect fallback should run or report.
@@ -67,33 +88,18 @@ fn session_live(s: &Arc<super::RecordingState>) -> bool {
             .map_or(false, |m| Arc::ptr_eq(m.get_state(), s))
 }
 
-/// RAII guard for the stop-tail flag. Sets `IS_RECORDING_STOPPING` true on
-/// construction and clears it on Drop — including during unwind — so a panic
-/// anywhere in the ~320-line stop tail can't leave the flag stuck true and
-/// silently kill the mic-disconnect fallback for every later recording.
-///
-/// This unwind-clears behaviour depends on `panic = "unwind"` (the default).
-/// If a release profile ever sets `panic = "abort"`, Drop won't run on panic
-/// and the stuck-flag failure mode returns — add a start-time reset then.
-struct StoppingGuard;
-impl StoppingGuard {
-    fn new() -> Self {
-        IS_RECORDING_STOPPING.store(true, Ordering::SeqCst);
-        StoppingGuard
-    }
-}
-impl Drop for StoppingGuard {
-    fn drop(&mut self) {
-        IS_RECORDING_STOPPING.store(false, Ordering::SeqCst);
-    }
-}
-
 /// Shared start-path finalize. Both start commands MUST call this so a new
 /// start path can't silently ship with a per-session flag left unreset (e.g.
 /// the mic-recovery budget already exhausted).
 fn finalize_recording_start() {
     info!("🔍 Setting IS_RECORDING to true and resetting SPEECH_DETECTED_EMITTED");
     IS_RECORDING.store(true, Ordering::SeqCst);
+    *LAST_RECORDING_ERROR.lock().unwrap() = None;
+    let capture = RECORDING_MANAGER.lock().unwrap().as_ref().and_then(|m|m.capture_info());
+    *LAST_CAPTURE.lock().unwrap() = capture;
+    *LAST_DURATION.lock().unwrap() = None;
+    LAST_STOP_FAILED.store(false, Ordering::SeqCst);
+    STOP_DEADLINE_EXPIRED.store(false, Ordering::SeqCst);
     MIC_FALLBACK_FAILED_ATTEMPTS.store(0, Ordering::SeqCst); // fresh mic-recovery budget per session
     reset_speech_detected_flag(); // reset speech-detected emit latch for the new session
 }
@@ -318,6 +324,8 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     crate::local_transcription::prioritize_user_work();
     let engine_lifecycle_guard = CAPTURE_START_LOCK.lock().await;
+    if recovery_restart_requested() { return Err("oats is restarting to recover the recording. Wait for it to reopen.".into()); }
+    if IS_RECORDING_STOPPING.load(Ordering::SeqCst) { return Err(super::recording_shutdown::STOP_PENDING.into()); }
     let _update_start = crate::updates::start_lease()?;
     if crate::dictation::is_busy() { return Err("Finish or cancel dictation before starting a meeting recording.".into()); }
     crate::dictation::release_idle_model();
@@ -386,10 +394,15 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     });
 
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
+    let microphone_open_expected = microphone_device.is_some();
     let transcription_receiver = manager
         .start_recording(microphone_device, system_device, auto_save)
         .await
         .map_err(|error| map_recording_start_error(&app, error))?;
+
+    if microphone_open_expected && manager.get_state().get_microphone_device().is_none() {
+        let _ = app.emit("mic-unavailable", serde_json::json!({"reason":"microphone_open_failed","system_audio_only":true}));
+    }
 
     // Take the device event receiver BEFORE storing manager globally.
     // A background task will process device events (hot-swap) without frontend polling.
@@ -490,6 +503,8 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     crate::local_transcription::prioritize_user_work();
     let engine_lifecycle_guard = CAPTURE_START_LOCK.lock().await;
+    if recovery_restart_requested() { return Err("oats is restarting to recover the recording. Wait for it to reopen.".into()); }
+    if IS_RECORDING_STOPPING.load(Ordering::SeqCst) { return Err(super::recording_shutdown::STOP_PENDING.into()); }
     let _update_start = crate::updates::start_lease()?;
     if crate::dictation::is_busy() { return Err("Finish or cancel dictation before starting a meeting recording.".into()); }
     crate::dictation::release_idle_model();
@@ -555,10 +570,15 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     });
 
     // Start recording with specified devices and auto_save setting
+    let microphone_open_expected = mic_device.is_some();
     let transcription_receiver = manager
         .start_recording(mic_device, system_device, auto_save)
         .await
         .map_err(|error| map_recording_start_error(&app, error))?;
+
+    if microphone_open_expected && manager.get_state().get_microphone_device().is_none() {
+        let _ = app.emit("mic-unavailable", serde_json::json!({"reason":"microphone_open_failed","system_audio_only":true}));
+    }
 
     // Take the device event receiver BEFORE storing manager globally.
     // A background task will process device events (hot-swap) without frontend polling.
@@ -641,49 +661,131 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
 /// Stop recording with optimized graceful shutdown ensuring NO transcript chunks are lost
 pub async fn stop_recording<R: Runtime>(app: AppHandle<R>, _args: RecordingArgs) -> Result<(), String> {
-    let _capture_guard = CAPTURE_START_LOCK.lock().await;
-    if !IS_RECORDING.load(Ordering::SeqCst) { return Ok(()); }
-    let _stopping_guard = StoppingGuard::new();
-    let manager = RECORDING_MANAGER.lock().unwrap().take();
-    let mut manager = manager.ok_or_else(|| "Recording manager missing; recover saved source chunks".to_string())?;
+    let capture_guard = CAPTURE_START_LOCK.lock().await;
+    let pending = STOP_TASK.lock().unwrap().as_ref().map(|sender|sender.subscribe());
+    let receiver = if let Some(receiver) = pending {
+        receiver
+    } else {
+        let manager = RECORDING_MANAGER.lock().unwrap().take();
+        let Some(manager) = manager else {
+            IS_RECORDING.store(false, Ordering::SeqCst);
+            IS_RECORDING_STOPPING.store(false, Ordering::SeqCst);
+            drop(capture_guard);
+            emit_recording_state(&app).await;
+            return if LAST_STOP_FAILED.load(Ordering::SeqCst) {
+                Err(LAST_RECORDING_ERROR.lock().unwrap().clone().unwrap_or_else(||"Source audio needs recovery.".into()))
+            } else { Ok(()) };
+        };
+        IS_RECORDING_STOPPING.store(true, Ordering::SeqCst);
+        // Freeze duration and reject new callbacks before teardown is scheduled.
+        manager.get_state().stop_recording();
+        *LAST_DURATION.lock().unwrap() = manager.get_state().get_recording_duration();
+        IS_RECORDING.store(false, Ordering::SeqCst);
+        *LAST_CAPTURE.lock().unwrap() = manager.capture_info();
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        *STOP_TASK.lock().unwrap() = Some(sender.clone());
+        let task_app = app.clone();
+        let task_capture = manager.capture_info();
+        tokio::spawn(async move {
+            // A supervisor observes panics too. The owned worker outlives every
+            // timed-out caller, keeping unsafe concurrent capture quarantined.
+            let result = tokio::spawn(finish_recording(task_app.clone(), manager)).await
+                .map_err(|error|format!("Recording finalization failed: {error}. Source chunks are retained for recovery."))
+                .and_then(|result|result);
+            let result_for_waiters = result.as_ref().map(|_|()).map_err(Clone::clone);
+            {
+                let _guard = CAPTURE_START_LOCK.lock().await;
+                LAST_STOP_FAILED.store(result_for_waiters.is_err(), Ordering::SeqCst);
+                if let Err(error) = &result_for_waiters { *LAST_RECORDING_ERROR.lock().unwrap() = Some(error.clone()); }
+                IS_RECORDING_STOPPING.store(false, Ordering::SeqCst);
+                STOP_DEADLINE_EXPIRED.store(false, Ordering::SeqCst);
+                *STOP_TASK.lock().unwrap() = None;
+                // Publish this session's terminal events before a fresh Start
+                // can acquire the lifecycle lease and publish newer events.
+                match result {
+                    Ok(payload) => {
+                        let _ = task_app.emit("capture-finalized", &payload["capture"]);
+                        let _ = task_app.emit("transcription-complete", serde_json::json!({"capture_only":true,"pending_local_transcription":true}));
+                        let _ = task_app.emit("recording-stopped", payload);
+                    }
+                    Err(error) => {
+                        let _ = task_app.emit("recording-interrupted", serde_json::json!({"capture":task_capture,"error":error}));
+                        let _ = task_app.emit("recording-error", &error);
+                    }
+                }
+                let _ = sender.send(Some(result_for_waiters));
+            }
+            emit_recording_state(&task_app).await;
+            crate::tray::update_tray_menu(&task_app);
+        });
+        receiver
+    };
+    let observed_capture = LAST_CAPTURE.lock().unwrap().as_ref().map(|capture|capture.session_id.clone());
+    drop(capture_guard);
+    emit_recording_state(&app).await;
+    let result = super::recording_shutdown::wait(receiver, super::recording_shutdown::STOP_WAIT).await;
+    if result.as_ref().err().map(String::as_str) == Some(super::recording_shutdown::STOP_PENDING)
+        && IS_RECORDING_STOPPING.load(Ordering::SeqCst) {
+        let guard = CAPTURE_START_LOCK.lock().await;
+        if IS_RECORDING_STOPPING.load(Ordering::SeqCst)
+            && LAST_CAPTURE.lock().unwrap().as_ref().map(|capture|capture.session_id.clone()) == observed_capture {
+            STOP_DEADLINE_EXPIRED.store(true, Ordering::SeqCst);
+        }
+        drop(guard);
+        emit_recording_state(&app).await;
+    }
+    result
+}
+
+async fn finish_recording<R: Runtime>(app: AppHandle<R>, mut manager: RecordingManager) -> Result<serde_json::Value, String> {
     let _ = app.emit("recording-shutdown-progress", serde_json::json!({"stage":"stopping_audio","message":"Saving source audio...","progress":20}));
     let result = manager.stop_streams_and_force_flush().await;
-    // Capture is stopped even if a disk verification failed. Source files are
-    // retained and a failed save never emits a false success event.
-    IS_RECORDING.store(false, Ordering::SeqCst);
+    // A hot-swap temporarily owns streams outside the manager. Its guard must
+    // release too before a new recording can own audio devices safely.
+    while device_recovery_in_progress() {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     {
         use tauri::Listener;
         if let Some(listener_id) = TRANSCRIPT_LISTENER_ID.lock().unwrap().take() { app.unlisten(listener_id); }
     }
-    crate::tray::update_tray_menu(&app);
     if let Err(error) = result {
         let message = format!("Source audio needs recovery: {error:#}");
-        let _ = app.emit("recording-error", &message);
         return Err(message);
     }
     manager.save_recording_only(&app).await.map_err(|e| e.to_string())?;
     let capture = manager.capture_info();
-    let _ = app.emit("capture-finalized", &capture);
-    // Frontend can persist an audio-only meeting now; inference has a separate
-    // lifecycle and its own progress. This is not an ASR completion claim.
-    let _ = app.emit("transcription-complete", serde_json::json!({"capture_only":true,"pending_local_transcription":true}));
-    app.emit("recording-stopped", serde_json::json!({
+    Ok(serde_json::json!({
         "message":"Source audio saved", "folder_path":manager.get_meeting_folder(),
         "meeting_name":manager.get_meeting_name(), "capture":capture,
         "pending_local_transcription":true
-    })).map_err(|e| e.to_string())?;
-    Ok(())
+    }))
+}
+
+fn device_recovery_in_progress() -> bool {
+    #[cfg(target_os = "windows")]
+    let system = SYSTEM_SWAP_IN_PROGRESS.load(Ordering::SeqCst);
+    #[cfg(not(target_os = "windows"))]
+    let system = false;
+    MIC_SWAP_IN_PROGRESS.load(Ordering::SeqCst) || system
+}
+
+async fn emit_recording_state<R: Runtime>(app: &AppHandle<R>) {
+    let _ = app.emit("recording-state-changed", get_recording_state().await);
 }
 
 fn spawn_capture_health_monitor<R: Runtime>(app: AppHandle<R>, session: Arc<super::RecordingState>) {
     tokio::spawn(async move {
-        let mut reported = None;
-        while session.is_recording() {
-            if let Some(error) = session.capture_error() {
-                if reported.as_ref() != Some(&error) {
-                    let _ = app.emit("recording-error", &error);
-                    reported = Some(error);
-                }
+        // Start publishes the manager and flags while holding this lease.
+        let started = CAPTURE_START_LOCK.lock().await;
+        drop(started);
+        loop {
+            if !session_live(&session) { return; }
+            if let Some(message) = super::recording_shutdown::stop_reason(session.is_recording(), session.get_recording_duration().unwrap_or(0.0), session.capture_error()) {
+                *LAST_RECORDING_ERROR.lock().unwrap() = Some(message.clone());
+                let _ = app.emit("recording-error", &message);
+                let _ = stop_recording(app.clone(), RecordingArgs { save_path:String::new() }).await;
+                return;
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
@@ -692,11 +794,11 @@ fn spawn_capture_health_monitor<R: Runtime>(app: AppHandle<R>, session: Arc<supe
 
 /// Check if recording is active
 pub async fn is_recording() -> bool {
-    IS_RECORDING.load(Ordering::SeqCst)
+    capture_in_progress()
 }
 
 pub(crate) fn capture_in_progress() -> bool {
-    IS_RECORDING.load(Ordering::SeqCst)
+    IS_RECORDING.load(Ordering::SeqCst) || IS_RECORDING_STOPPING.load(Ordering::SeqCst) || recovery_restart_requested()
 }
 
 /// Get recording statistics
@@ -791,11 +893,18 @@ pub async fn is_recording_paused() -> bool {
 #[tauri::command]
 pub async fn get_recording_state() -> serde_json::Value {
     let is_recording = IS_RECORDING.load(Ordering::SeqCst);
+    let is_stopping = IS_RECORDING_STOPPING.load(Ordering::SeqCst) || recovery_restart_requested();
+    let can_restart = is_stopping && STOP_DEADLINE_EXPIRED.load(Ordering::SeqCst);
+    let last_error = LAST_RECORDING_ERROR.lock().unwrap().clone();
+    let capture = LAST_CAPTURE.lock().unwrap().clone();
     let manager_guard = RECORDING_MANAGER.lock().unwrap();
 
     if let Some(manager) = manager_guard.as_ref() {
         serde_json::json!({
             "is_recording": is_recording,
+            "is_stopping": is_stopping, "last_error":last_error, "capture":capture,
+            "can_restart_after_capture_failure":can_restart,
+            "max_duration_seconds":super::durable_capture::MAX_CAPTURE_SECONDS,
             "is_paused": manager.is_paused(),
             "is_active": manager.is_active(),
             "recording_duration": manager.get_recording_duration(),
@@ -806,9 +915,12 @@ pub async fn get_recording_state() -> serde_json::Value {
     } else {
         serde_json::json!({
             "is_recording": is_recording,
+            "is_stopping": is_stopping, "last_error":last_error, "capture":capture,
+            "can_restart_after_capture_failure":can_restart,
+            "max_duration_seconds":super::durable_capture::MAX_CAPTURE_SECONDS,
             "is_paused": false,
             "is_active": false,
-            "recording_duration": null,
+            "recording_duration": *LAST_DURATION.lock().unwrap(),
             "active_duration": null,
             "total_pause_duration": 0.0,
             "current_pause_duration": null
@@ -951,7 +1063,7 @@ async fn do_mic_swap(device_name: &str, session: &Arc<super::RecordingState>) ->
     // Non-fatal: the replacement stream is created next regardless, so a
     // teardown error/stall on the already-dead device must not abort the swap.
     if let Some(s) = old_mic {
-        if let Err(e) = s.stop() {
+        if let Err(e) = tokio::task::spawn_blocking(move || s.stop()).await.map_err(|e|e.to_string())? {
             warn!("[HOT_SWAP] Failed to stop old mic stream (proceeding): {}", e);
         }
     }
@@ -1339,7 +1451,9 @@ async fn swap_system_to_default(session: &Arc<super::RecordingState>) -> Result<
         if !manager.is_recording() || !Arc::ptr_eq(manager.get_state(), session) { return Err("Session changed".into()); }
         manager.take_system_stream_for_swap()
     };
-    if let Some(stream) = old { let _ = stream.stop(); }
+    if let Some(stream) = old {
+        let _ = tokio::task::spawn_blocking(move || stream.stop()).await.map_err(|e|e.to_string())?;
+    }
     let device = Arc::new(default_output_device().map_err(|e|e.to_string())?);
     let stream = super::stream::AudioStream::create(device.clone(), session.clone(), super::recording_state::DeviceType::System, None).await.map_err(|e|e.to_string())?;
     let name = device.name.clone();
@@ -1366,6 +1480,7 @@ pub async fn list_recoverable_captures(state: tauri::State<'_, crate::state::App
         let directory = entry.path();
         if !directory.join("session.json").is_file() || !directory.join("timeline.jsonl").is_file() { continue; }
         let directory = match checked_capture_directory(&directory) { Ok(path) => path, Err(_) => continue };
+        if super::capture_removal::removed(&directory) { continue; }
         // A meeting is created at capture START. Linking alone cannot prove
         // that a crashed recorder reached finalization or recovery.
         let journal=std::fs::read_to_string(directory.join("timeline.jsonl")).unwrap_or_default();
@@ -1387,9 +1502,32 @@ pub async fn list_recoverable_captures(state: tauri::State<'_, crate::state::App
             "session_id":session["session_id"], "session_dir":directory,
             "meeting_name":session["meeting_name"], "created_at":session["created_at"],
             "audio_only_supported":true
+            ,"audio_removal_pending":directory.join(super::capture_removal::TOMBSTONE).exists()
         }));
     }
     Ok(captures)
+}
+
+/// Explicitly delete the selected recovery entry's audio, retaining all saved
+/// text and identity metadata. Regular verified linked meetings are excluded.
+#[tauri::command]
+pub async fn delete_recoverable_capture(session_dir:String, state:tauri::State<'_,crate::state::AppState>) -> Result<serde_json::Value,String> {
+    let capture_guard = CAPTURE_START_LOCK.lock().await;
+    if capture_in_progress() { return Err("Finish the active recording before removing saved source audio.".into()); }
+    let directory = checked_capture_directory(std::path::Path::new(&session_dir))?;
+    if super::capture_removal::removed(&directory) { return Ok(serde_json::json!({"audio_removed":true,"already_removed":true})); }
+    let eligible = list_recoverable_captures(state).await?;
+    if !eligible.iter().any(|capture|capture["session_dir"].as_str().map(std::path::Path::new) == Some(directory.as_path())) {
+        return Err("This source is no longer a Saved Audio Recovery entry. Delete completed meetings from their meeting page.".into());
+    }
+    let workers = crate::local_transcription::prepare_capture_removal(&directory).await?;
+    tokio::task::spawn_blocking(move || {
+        // Ownership outlives a closed/reloaded webview and its cancelled invoke.
+        let _capture_guard = capture_guard;
+        let _workers = workers;
+        super::capture_removal::remove_audio(&directory).map_err(|error|error.to_string())
+    })
+        .await.map_err(|error|error.to_string())?
 }
 
 fn capture_path_key(path: &std::path::Path) -> String {
@@ -1416,6 +1554,8 @@ fn checked_capture_directory(directory: &std::path::Path) -> Result<std::path::P
 pub async fn recover_local_capture(session_dir: String) -> Result<serde_json::Value, String> {
     crate::local_transcription::prioritize_user_work();
     let _capture_guard = CAPTURE_START_LOCK.lock().await;
+    if recovery_restart_requested() { return Err("Wait for oats to reopen before recovering saved audio.".into()); }
+    if IS_RECORDING_STOPPING.load(Ordering::SeqCst) { return Err(super::recording_shutdown::STOP_PENDING.into()); }
     let directory = checked_capture_directory(std::path::Path::new(&session_dir))?;
     let active = RECORDING_MANAGER.lock().unwrap().as_ref().and_then(|m|m.capture_info());
     if active.as_ref().map(|info|std::fs::canonicalize(&info.session_dir).ok()) == Some(Some(directory.clone())) {

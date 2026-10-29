@@ -1,42 +1,26 @@
-xx — I listen and I don't judge
+oats for Windows
 
-Run the xx Windows setup program, then open xx from Start. Opening the application
-does not begin recording; use its Record control when ready.
+Open oats from the Windows Start menu. Opening the app does not start recording.
 
-This installer contains the desktop application, FFmpeg, and required Microsoft
-C++ runtime files. It reuses the models and Python environments already prepared
-on this laptop. It does not contain a portable copy of all model weights.
+Installing on a new PC
+Download Oats-Setup.exe and click Install oats. Older copies call this
+Download and install. Setup downloads the app and speech models for you.
+You do not need to install Python or run terminal commands.
 
-Data location
-The file sttapp-local-install.json beside the application contains its data_root.
-The recommended data root is %LOCALAPPDATA%\STTApp. An existing installation may
-point to another local directory; the manifest is the source of truth.
+Installation guide:
+https://github.com/Ripplescale/Oats_Transcription_Platform/blob/main/docs/COMPLETE_SETUP.md
 
-Recordings, the database, models, worker environments, and the private Python
-runtime use that directory, outside OneDrive. The private Python base is copied
-and verified; normal model operation does not depend on Codex's separate managed
-Python cache or on the compiler tools installed for the build.
+Updating oats
+Inside oats, open About, choose Check for updates, then download and install
+the offered update. You do not need the large setup again.
+Updates keep your notes, recordings and downloaded speech models.
 
-Early installations used Codex's Windows package LocalCache folder. If your
-manifest still points there, uninstalling or resetting Codex may remove that
-data. Back up the full data root before doing either. This installer reuses
-local runtimes; it is not a portable model bundle.
+Your first recording
+Click New note, speak for a short time, then click Finish recording.
+Check that you can play the audio and read its transcript.
+CPU mode prepares meeting transcripts after recording finishes.
 
-A later migration can place data in the ordinary Windows user-local directory
-(normally %LOCALAPPDATA%\STTApp). That migration must update saved
-absolute recording, model, worker, and environment paths and verify the history
-before removing the old copy. This build does not move or delete existing data.
-
-No cloud summaries are configured. The Claude handoff copies or exports text for
-you to review and send manually. Trelis retains its original mixed script.
-
-This local installer is unsigned. It is not configured to contact the upstream
-application updater. Keep the setup file and the local runtime/data backup together
-when preserving this tested installation.
-
-Upgrade identity
-The application identifier remains com.sttapp.local. Saved preferences, the
-SQLite database, recordings, transcript corrections, and notes are preserved.
-The older application can remain installed, but close it normally before opening
-xx because both versions use the same local workspace. This installer does not
-delete or rename any source recording.
+Interrupted recordings
+Home shows Saved audio recovery when an interrupted recording needs attention.
+Choose Recover saved audio, or Delete saved audio if you no longer need it.
+Deleting recovery audio keeps notes and transcript text already saved in oats.

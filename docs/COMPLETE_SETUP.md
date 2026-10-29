@@ -1,87 +1,57 @@
-# Install oats on another Windows PC
+# Install oats
 
-Download **Oats-Setup.exe** from the [complete setup release](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/tag/setup-90c87eedfa370799c4dc).
+You only need **Oats-Setup.exe**. It downloads the app and everything needed for speech recognition from GitHub.
 
-1. Open Oats-Setup.exe and choose a folder for the downloaded components.
-2. Choose **Download and install**. Leave setup open until it finishes.
-3. Open **oats** from Start. Allow microphone access when Windows asks.
+## On the PC where you want to use oats
 
-The setup downloads everything from GitHub release assets: the oats 0.8.8
-installer, private Python and speech libraries, Trelis and Apex models, the
-speech gate, and the offline Microsoft WebView2 installer. No Python, Git, Node,
-terminal commands or Hugging Face account are needed on the new PC.
-The small setup executable includes the full app-local Microsoft C++ runtime.
-Its large model parts are shared from the immutable GitHub payload release;
-setup follows those pinned links automatically.
+1. Download **[Oats-Setup.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4dc/Oats-Setup.exe)**.
+2. Open it and click **Install oats**. If your copy says **Download and install**, that is the same option.
+3. Wait for setup to finish, then open **oats** from the Windows Start menu.
+4. In oats, open **About → Check for updates** and install any available update.
 
-The download is about **10.4 GiB**, and the runtime expands to **13.1 GiB**.
-Allow **30 GiB free** when both are on the same drive. Keep the executable and
-every numbered part together.
-If a download is interrupted, open setup again and select the same folder to
-resume. It verifies each downloaded part and each extracted file. Do not rename
-the parts or combine them manually.
+Allow microphone access if Windows asks. You do not need to install Python, use a terminal, or create an account.
 
-## Install without internet on the destination PC
+The first download is about **11 GB**. Keep about **30 GB free** for the download and installation. Setup needs internet for this first download. Once installed, recording and speech recognition work without internet.
 
-On a connected Windows PC, open the same executable and choose **Save for
-offline setup**. Once it says the download is complete, copy the **entire folder**
-to the destination PC. Open Oats-Setup.exe there and choose **Download and
-install**. When all parts are present and verified, it installs from that folder
-without fetching anything else.
+If the download stops, reopen setup and choose the **same download folder**. It can continue from the files already there.
 
-## Repair an existing installation where both models fail
+The linked setup is the currently published version. The new button wording and additional speech check below take effect when the updated setup is published.
 
-With oats **0.8.9 or later**, **About → Check for updates** provides an app-only
-fix: the app prepares the missing package work folders before a transcription
-starts or resumes. After updating, retry the saved transcription. The small
-standalone repair below is also available without updating the app.
+## Only if the other PC has no internet
 
-Complete setup builds before 2026-10-28 omitted the empty Trelis cache and Apex
-working directories. The model files could pass validation while both actual
-adapters refused to start with `cache_dir_missing` or `work_dir_missing`.
+Skip this section if you can run setup on the PC where you will use oats.
 
-1. Download [Oats-Repair.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4dc/Oats-Repair.exe).
-2. Open it and choose **Check / repair folders**. You can leave oats open.
-3. In oats, open **Tools → Transcription & versions** and resume/retry the failed
-   transcription using its saved recording.
+1. On a PC with internet, open **Oats-Setup.exe**.
+2. Click **Download for another PC**. Older setup calls this **Save for offline setup**.
+3. When the download finishes, copy the **whole download folder** to the other PC using a USB drive or another transfer method.
+4. On that PC, open **Oats-Setup.exe** from the copied folder and click **Install oats** (or **Download and install**).
 
-The repair creates and checks only the two configured package work folders.
-It does not download models, reinstall the app, change runtime configuration or
-checkpoints, remove compiled cache files, or replace recordings and notes. If a
-problem remains after retrying, run the repair check again and use **Copy report**
-to share the recent worker error messages and setup paths. Recording files are
-not included in that report.
-## Compatible PCs
+Use the same setup program in both cases. Do not rename or manually join the numbered download files.
 
-This package targets Windows x64, with Windows 11 recommended. Windows ARM and
-macOS are not supported. Trelis is a large model: allow substantial disk space
-for both the saved download folder and extracted runtime, and use at least
-16 GB RAM (32 GB recommended for live Trelis with shared GPU memory).
+## If oats is already installed
 
-Live Trelis meeting transcription needs a supported Intel GPU and its driver.
-The setup checks for the GPU and asks before choosing CPU mode on other PCs.
-CPU mode can transcribe after recording; it may be too slow for useful live
-dictation. Setup does not install GPU drivers, and a detected GPU does not
-guarantee a particular transcription speed or accuracy.
+Open **About → Check for updates**, then choose to download and install the update. You do not need to download the large setup again. App updates keep your notes, recordings and speech models.
 
-Optional Community-1 speaker identification is not included in this package.
-Its gated model setup remains separate. Recording, notes, Trelis transcription
-and dictation, and Apex fallback use the bundled core runtime.
+## Before using it for a long meeting
 
-## Existing installations and updates
+Record a short test, click **Finish recording**, and check that you can play the audio and read the transcript. Then try dictation into a text box in another app.
 
-This complete setup is for a new PC. It stops before replacing an existing
-speech configuration. Existing users should use **About → Check for updates**
-or the automatic update notification. App updates remain small and preserve the
-downloaded speech models, notes and recordings.
+The updated setup also tests both speech engines using a short generated audio clip. If the GPU test fails, it asks whether to try CPU mode. CPU mode can be slower, particularly for live dictation. This check does not test your microphone or guarantee transcription accuracy.
 
-Release integrity uses the existing oats detached signing identity and SHA-256
-hashes. This is separate from Windows Authenticode publisher signing.
+## What kind of PC do I need
 
-## Validation status
+- Windows x64; Windows 11 recommended. This installer does not support Windows ARM or macOS.
+- At least 16 GB RAM; 32 GB recommended for live Trelis transcription.
+- A compatible Intel GPU and current driver for useful live Trelis performance. CPU mode prepares meeting transcripts after you finish recording; dictation can be slow.
 
-The release notes distinguish automated tests, extraction/runtime checks on the
-development laptop, and hands-on acceptance on a new PC. The first two do not
-establish microphone capture or real-time performance on an arbitrary machine.
-For a first test, record a short Hindi/English note, stop it, check its transcript
-and playback, then try dictation into a text box in another application.
+Optional speaker identification is separate. You do not need it for recording, notes, transcription or dictation.
+
+## If transcription says needs attention
+
+1. Update oats through **About → Check for updates**.
+2. Open the saved meeting, then **Tools → Transcription & versions**.
+3. Retry the transcription. You do not need to record the meeting again.
+
+For an older complete installation where both models fail, **[Oats-Repair.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4dc/Oats-Repair.exe)** can repair missing working folders. Click **Check / repair folders**, then retry the meeting. If it still fails, use **Copy report** to share the error details.
+
+Building oats from source? Use the separate [developer guide](DEVELOPER_SETUP.md).

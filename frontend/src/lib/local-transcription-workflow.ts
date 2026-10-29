@@ -3,7 +3,7 @@ import type { TranscriptSegmentMetadata, TranscriptArchivedSegment } from './tra
 export type WorkflowRole = 'live-draft' | 'final' | 'live-final' | 'fallback';
 export type TrelisProfileId = 'trelis-5' | 'trelis-10' | 'trelis-20';
 export type LocalProfileId = TrelisProfileId | 'apex-20';
-export interface LocalProfile { id: string; model: string; chunk_seconds: number; available: boolean; reason?: string; live_qualified: boolean }
+export interface LocalProfile { id: string; model: string; chunk_seconds: number; available: boolean; reason?: string; live_qualified: boolean; recommended_timing?: LocalPreferences['timing'] }
 export interface LocalSegment extends TranscriptSegmentMetadata { id: string; text: string; source_track: string; start_seconds?: number; end_seconds?: number; recognition_original?: { text?: string } }
 export interface LocalJob { job_id: string; session_dir: string; profile: string; final_profile?: TrelisProfileId; state: string; phase?: string; workflow_role?: WorkflowRole; capture_session_id?: string; language_mode?: 'hinglish' | 'english'; processed_audio_seconds?: number; available_audio_seconds?: number; backlog_seconds?: number; segments?: LocalSegment[]; segments_revision?: number; superseded_segments?: TranscriptArchivedSegment[]; error?: string }
 export interface LocalPreferences { profile: LocalProfileId; languageMode: 'hinglish' | 'english'; timing: 'after-recording' | 'during-recording' }
@@ -47,11 +47,34 @@ export class LocalWorkflow {
   private startInFlight = false;
   private startingRun?: WorkflowRun;
   private notifiedStopped = new Set<string>();
+  private deleting = false;
+  private tickCompletion = Promise.resolve();
+  private finishTick?: () => void;
+  private profileTiming = new Map<string, LocalPreferences['timing']>();
+  private profilesConfigured = false;
+  private profileProbe?: Promise<void>;
   constructor(private dependencies: Dependencies, previous?: Partial<WorkflowState>) {
     this.state = { preferences: readPreferences(previous?.preferences), runs: Array.isArray(previous?.runs) ? previous.runs : [], currentSession: previous?.currentSession };
   }
   private changed() { this.state = { ...this.state, runs: [...this.state.runs] }; this.dependencies.changed(this.state); }
   setPreferences(preferences: LocalPreferences) { this.state.preferences = readPreferences(preferences); this.changed(); }
+  configureProfiles(profiles: LocalProfile[]) {
+    this.profileTiming = new Map(profiles.filter(profile => ['during-recording','after-recording'].includes(profile.recommended_timing ?? ''))
+      .map(profile => [profile.id, profile.recommended_timing!] as const));
+    this.profilesConfigured = true;
+  }
+  prepareProfiles(): Promise<void> {
+    if (this.profilesConfigured) return Promise.resolve();
+    this.profileProbe ??= this.dependencies.invoke<LocalProfile[]>('get_local_stt_profiles')
+      .then(profiles => this.configureProfiles(profiles))
+      .catch(() => {
+        // A readiness read failure must not guess live GPU support and leave
+        // a fresh CPU recording with a permanent startup error. Record first.
+        for (const profile of ['trelis-5','trelis-10','trelis-20']) this.profileTiming.set(profile,'after-recording');
+        this.profilesConfigured = true;
+      });
+    return this.profileProbe;
+  }
   private async serialize(key: string, operation: () => Promise<void>) {
     const prior = this.locks.get(key) ?? Promise.resolve();
     const pending = prior.catch(() => {}).then(operation);
@@ -74,7 +97,7 @@ export class LocalWorkflow {
       const fallback = this.state.runs.find(item => item.role === 'fallback' && this.sameCapture(item, capture));
       run = { capture, role: 'live-final', primary: true, recording, captureEnded: !recording,
         // Old fallback jobs predate selectable chunk lengths and used Trelis20.
-        preferences: { profile: trelisProfile(fallback ? fallback.finalProfile ?? fallback.job?.final_profile ?? 'trelis-20' : this.state.preferences.profile), timing: 'during-recording', languageMode: fallback?.preferences.languageMode ?? this.state.preferences.languageMode },
+        preferences: { profile: trelisProfile(fallback ? fallback.finalProfile ?? fallback.job?.final_profile ?? 'trelis-20' : this.state.preferences.profile), timing: fallback ? fallback.preferences.timing : this.profileTiming.get(this.state.preferences.profile) ?? 'during-recording', languageMode: fallback?.preferences.languageMode ?? this.state.preferences.languageMode },
         meetingId: fallback?.meetingId, pausedByUser: !!fallback, fallbackRequested: !!fallback };
       this.state.runs.push(run);
     }
@@ -110,6 +133,7 @@ export class LocalWorkflow {
     }
   }
   async captureStarted(capture: CaptureSession) {
+    await this.prepareProfiles();
     await this.serialize(capture.session_id, async () => {
       const legacy = this.legacy(capture);
       if (legacy) {
@@ -137,6 +161,7 @@ export class LocalWorkflow {
     await this.tick();
   }
   async captureStopped(capture: CaptureSession) {
+    await this.prepareProfiles();
     await this.serialize(capture.session_id, async () => {
       const legacy = this.legacy(capture);
       if (legacy) {
@@ -174,6 +199,19 @@ export class LocalWorkflow {
       if (draft.job && !isTerminalJob(draft.job.state)) await this.requestStop(draft);
     });
     await this.tick();
+  }
+  async captureInterrupted(capture: CaptureSession, error: string) {
+    await this.serialize(capture.session_id, async () => {
+      if (!this.state.runs.some(run => this.sameCapture(run, capture))) this.liveRun(capture, false);
+      for (const run of this.state.runs.filter(run => this.sameCapture(run, capture))) {
+        run.recording = false; run.captureEnded = true; run.needsRecovery = true;
+        run.resumeRequested = false;
+        run.error = `The recording was interrupted. Recover its saved audio before resuming transcription. ${error}`;
+        if (run.job && !isTerminalJob(run.job.state)) await this.requestStop(run);
+      }
+      if (this.state.currentSession === capture.session_id) this.state.currentSession = undefined;
+      this.changed();
+    });
   }
   private notifyStopped(run: WorkflowRun, meetingId?: string) {
     const id = run.capture.session_id;
@@ -218,6 +256,7 @@ export class LocalWorkflow {
   }
   private eligible(run: WorkflowRun) {
     if (run.pausedByUser || run.needsRecovery || run.error || !run.meetingId) return false;
+    if (run.role === 'live-final' && run.recording && run.preferences.timing === 'after-recording') return false;
     if (run.role === 'live-draft' && (!run.recording || run.captureEnded || run.draftSkipped)) return false;
     if (run.role === 'final' && (run.recording || !run.captureEnded || !this.draftSettled(run))) return false;
     if (run.role === 'fallback' && !this.checkpointSettled(this.state.runs.find(item => item.role === 'live-final' && this.sameCapture(item, run.capture)))) return false;
@@ -379,9 +418,53 @@ export class LocalWorkflow {
     } catch (error) { run.speakerError = String(error); }
     finally { this.startInFlight = false; this.changed(); }
   }
+  /** Quiesce imports/launches before the native stop + database transaction. */
+  async deleteMeeting(meetingId: string) {
+    if (this.deleting) throw new Error('A conversation is already being removed.');
+    this.deleting = true;
+    try {
+      // A poll may already be importing or awaiting a launch. Let that bounded
+      // command finish before the native deletion lease takes ownership.
+      await this.tickCompletion;
+      await Promise.all([...this.locks.values()]);
+      const affected = this.state.runs.filter(run => run.meetingId === meetingId || run.transcriptMeetingId === meetingId);
+      if (affected.some(run => run.recording)) throw new Error('Finish recording before removing this conversation.');
+      const sessions = new Set(affected.map(run => pathKey(run.capture.session_dir)));
+      const removed = this.state.runs.filter(run => affected.includes(run) || sessions.has(pathKey(run.capture.session_dir)));
+      for (const run of removed) { run.pausedByUser = true; run.resumeRequested = false; }
+      this.changed();
+      // Native code stops only the matching owned workers, waits for their
+      // checkpoint locks, and guards new launches through database deletion.
+      await this.dependencies.invoke('api_delete_meeting', { meetingId });
+      this.state.runs = this.state.runs.filter(run => !removed.includes(run));
+      if (removed.some(run => run.capture.session_id === this.state.currentSession)) this.state.currentSession = undefined;
+      this.changed();
+    } finally {
+      this.deleting = false;
+    }
+  }
+  /** Remove only explicitly selected recovery audio; notes/transcripts survive. */
+  async deleteRecoveredAudio(capture: CaptureSession) {
+    if (this.deleting) throw new Error('A conversation or recovery recording is already being removed.');
+    this.deleting = true;
+    try {
+      await this.tickCompletion;
+      await this.serialize(capture.session_id, async () => {
+        const removed = this.state.runs.filter(run => this.sameCapture(run, capture));
+        if (removed.some(run => run.recording)) throw new Error('Finish recording before deleting its audio.');
+        for (const run of removed) { run.pausedByUser = true; run.resumeRequested = false; }
+        this.changed();
+        await this.dependencies.invoke('delete_recoverable_capture', { sessionDir: capture.session_dir });
+        this.state.runs = this.state.runs.filter(run => !removed.includes(run));
+        if (this.state.currentSession === capture.session_id) this.state.currentSession = undefined;
+        this.changed();
+      });
+    } finally { this.deleting = false; }
+  }
   async tick() {
-    if (this.ticking) return;
+    if (this.ticking || this.deleting) return;
     this.ticking = true;
+    this.tickCompletion = new Promise(resolve => { this.finishTick = resolve; });
     try {
       for (const run of this.state.runs) {
         if (!run.meetingId) {
@@ -430,6 +513,6 @@ export class LocalWorkflow {
         }
       }
       this.changed();
-    } finally { this.ticking = false; }
+    } finally { this.ticking = false; this.finishTick?.(); this.finishTick = undefined; }
   }
 }

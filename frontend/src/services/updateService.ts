@@ -56,8 +56,16 @@ export class UpdateService {
     if (this.lastOpenCheckTime > 0 && elapsed >= 0 && elapsed < 60_000) {
       return this.current ?? this.getStatus();
     }
-    this.lastOpenCheckTime = this.now();
-    return this.checkForUpdates(true);
+    // Only a successful metadata check earns the focus debounce. In particular,
+    // an offline launch must not suppress the following network-restored event.
+    try {
+      const result = await this.checkForUpdates(true);
+      this.lastOpenCheckTime = ['idle', 'available'].includes(result.state) ? this.now() : 0;
+      return result;
+    } catch (error) {
+      this.lastOpenCheckTime = 0;
+      throw error;
+    }
   }
   async checkForUpdates(force = false): Promise<UpdateInfo> {
     if (this.checking) return this.checking;

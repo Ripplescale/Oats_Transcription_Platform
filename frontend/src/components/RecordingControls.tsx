@@ -11,6 +11,10 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import Analytics from '@/lib/analytics';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import type { TranscriptionErrorPayload } from '@/services/transcriptService';
+import { recordingService } from '@/services/recordingService';
+import { LOCAL_TRANSCRIPT_ONLY } from '@/lib/local-workflow';
+import { prepareForUpdateInstall } from '@/lib/update-safety';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '@/components/ui/dialog';
 
 interface RecordingControlsProps {
   isRecording: boolean;
@@ -53,6 +57,10 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const [isProcessing, setIsProcessing] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
+  const stopPending = useRef(false);
+  const [restartOpen, setRestartOpen] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const restartPending = useRef(false);
   const [isPausing, setIsPausing] = useState(false);
   const [isResuming, setIsResuming] = useState(false);
   const MIN_RECORDING_DURATION = 2000; // 2 seconds minimum recording time
@@ -143,51 +151,38 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     console.log('Executing stop recording...');
     try {
       setIsProcessing(true);
-      const dataDir = await appDataDir();
+      const dataDir = LOCAL_TRANSCRIPT_ONLY ? '' : await appDataDir();
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const savePath = `${dataDir}/recording-${timestamp}.wav`;
       console.log('Saving recording to:', savePath);
       console.log('About to call stop_recording command');
-      const result = await invoke('stop_recording', {
-        args: {
-          save_path: savePath
-        }
-      });
+      const result = await recordingService.stopRecording(savePath);
       console.log('stop_recording command completed successfully:', result);
       setRecordingPath(savePath);
       // setShowPlayback(true);
       setIsProcessing(false);
       // Track successful transcription
       Analytics.trackTranscriptionSuccess();
-      onRecordingStop(true);
+      await onRecordingStop(true);
     } catch (error) {
       console.error('Failed to stop recording:', error);
-      if (error instanceof Error) {
-        console.error('Error details:', {
-          message: error.message,
-          name: error.name,
-          stack: error.stack,
-        });
-        if (error.message.includes('No recording in progress')) {
-          return;
-        }
-      } else if (typeof error === 'string' && error.includes('No recording in progress')) {
-        return;
-      } else if (error && typeof error === 'object' && 'toString' in error) {
-        if (error.toString().includes('No recording in progress')) {
-          return;
-        }
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes('No recording in progress')) {
+        setDeviceError({ title: 'Recording needs attention', message });
       }
-      setIsProcessing(false);
-      onRecordingStop(false);
+      try { await onRecordingStop(false); } catch (syncError) {
+        setDeviceError({ title: 'Could not check recording state', message: String(syncError) });
+      }
     } finally {
+      setIsProcessing(false);
       setIsStopping(false);
+      stopPending.current = false;
     }
   }, [onRecordingStop]);
 
   const handleStopRecording = useCallback(async () => {
     console.log('handleStopRecording called - isRecording:', isRecording, 'isStarting:', isStarting, 'isStopping:', isStopping, 'isStartingRecording:', isStartingRecording);
-    if (!isRecording || isStarting || isStopping || isStartingRecording) {
+    if ((!isRecording && !recordingState.nativeStopping) || isStarting || stopPending.current || isStartingRecording) {
       console.log('Early return from handleStopRecording due to state check');
       return;
     }
@@ -196,12 +191,13 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
 
     // Notify parent immediately (for UI state updates)
     onStopInitiated?.();
-
+    stopPending.current = true;
+    setDeviceError(null);
     setIsStopping(true);
 
     // Immediately trigger the stop action
     await stopRecordingAction();
-  }, [isRecording, isStarting, isStopping, isStartingRecording, stopRecordingAction, onStopInitiated]);
+  }, [isRecording, isStarting, isStopping, isStartingRecording, recordingState.nativeStopping, stopRecordingAction, onStopInitiated]);
 
   const handlePauseRecording = useCallback(async () => {
     if (!isRecording || isPaused || isPausing) return;
@@ -220,6 +216,21 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       setIsPausing(false);
     }
   }, [isRecording, isPaused, isPausing]);
+
+  const restartAfterFailure = async () => {
+    if (restartPending.current || !recordingState.canRestartAfterCaptureFailure) return;
+    restartPending.current = true; setRestarting(true);
+    try {
+      await prepareForUpdateInstall();
+      await invoke('restart_after_capture_failure');
+    } catch (reason) {
+      setDeviceError({ title: 'Could not restart safely', message: String(reason) });
+      setRestartOpen(false);
+      restartPending.current = false; setRestarting(false);
+    }
+    // A successful native restart request owns the exit. Keep the dialog
+    // modal so new edits cannot arrive after the final note flush.
+  };
 
   const handleResumeRecording = useCallback(async () => {
     if (!isRecording || !isPaused || isResuming) return;
@@ -334,16 +345,19 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   return (
     <div className="flex flex-col gap-2">
       <div className="xx-recording-controls flex items-center gap-3" aria-label="Recording controls">
-        {isProcessing && !isParentProcessing ? <span className="text-sm text-[var(--xx-muted)]" role="status">Saving your recording…</span> : !isRecording ?
+        {isProcessing && !isParentProcessing ? <span className="text-sm text-[var(--xx-muted)]" role="status">Saving your recording…</span> : !isRecording && !recordingState.nativeStopping ?
           <button onClick={() => { Analytics.trackButtonClick('start_recording', 'recording_controls'); void handleStartRecording(); }} disabled={isStarting || isProcessing || isRecordingDisabled || isValidatingModel || isStartingRecording} className="xx-button-primary !min-h-[42px] !px-5" aria-label="Start recording">
             <Mic size={17} />{isValidatingModel || isStartingRecording ? 'Getting ready…' : 'Start recording'}
           </button> : <>
             <span className="flex items-center gap-2 mr-1 text-xs tabular-nums text-[var(--xx-muted)]" aria-live="off"><span className={`h-2 w-2 rounded-full ${isPaused ? 'bg-amber-600' : 'bg-rose-600'}`} />{formatTime(recordingState.recordingDuration ?? 0)}</span>
-            <button onClick={() => isPaused ? void handleResumeRecording() : void handlePauseRecording()} disabled={isPausing || isResuming || isStopping} className="xx-button-secondary" aria-label={isPaused ? 'Resume recording' : 'Pause recording'}>{isPaused ? <Play size={15} /> : <Pause size={15} />}{isPausing ? 'Pausing…' : isResuming ? 'Resuming…' : isPaused ? 'Resume' : 'Pause'}</button>
-            <button onClick={() => { Analytics.trackButtonClick('stop_recording', 'recording_controls'); void handleStopRecording(); }} disabled={isStopping || isPausing || isResuming || isStartingRecording} className="xx-button-primary" aria-label="Stop recording"><Square size={13} fill="currentColor" />{isStopping ? 'Saving…' : 'Finish recording'}</button>
+            <button onClick={() => isPaused ? void handleResumeRecording() : void handlePauseRecording()} disabled={isPausing || isResuming || isStopping || recordingState.nativeStopping} className="xx-button-secondary" aria-label={isPaused ? 'Resume recording' : 'Pause recording'}>{isPaused ? <Play size={15} /> : <Pause size={15} />}{isPausing ? 'Pausing…' : isResuming ? 'Resuming…' : isPaused ? 'Resume' : 'Pause'}</button>
+            <button onClick={() => { Analytics.trackButtonClick('stop_recording', 'recording_controls'); void handleStopRecording(); }} disabled={isStopping || isPausing || isResuming || isStartingRecording} className="xx-button-primary" aria-label="Stop recording"><Square size={13} fill="currentColor" />{isStopping ? 'Saving…' : recordingState.nativeStopping ? 'Check finish' : 'Finish recording'}</button>
           </>}
       </div>
       {isValidatingModel && <p role="status" className="text-xs text-[var(--xx-muted)]">Checking recording readiness…</p>}
+      {(recordingState.recordingError || recordingState.nativeStopping) && <p role="alert" className="text-xs text-amber-800">{recordingState.recordingError || 'Finishing audio. A new recording will be available when the audio device is released.'}</p>}
+      {recordingState.canRestartAfterCaptureFailure && <button className="xx-button-secondary self-start" onClick={() => setRestartOpen(true)}>Restart oats to recover</button>}
+      <Dialog open={restartOpen} onOpenChange={open => { if (!restarting) setRestartOpen(open); }}><DialogContent className="max-w-sm"><DialogTitle>Restart to release the audio device?</DialogTitle><DialogDescription>Your notes will be saved first. Completed audio chunks stay available in Saved audio recovery. Audio that has not yet been written may be lost.</DialogDescription><DialogFooter><button className="xx-button-secondary" disabled={restarting} onClick={() => setRestartOpen(false)}>Keep waiting</button><button className="xx-button-primary" disabled={restarting} onClick={() => void restartAfterFailure()}>{restarting ? 'Saving and restarting…' : 'Save notes and restart'}</button></DialogFooter></DialogContent></Dialog>
       {deviceError && <Alert variant="destructive" className="mt-2 max-w-lg border-red-200 bg-red-50"><AlertCircle className="h-4 w-4" /><button onClick={() => setDeviceError(null)} className="absolute right-3 top-3" aria-label="Dismiss device error"><X size={14} /></button><AlertTitle>{deviceError.title}</AlertTitle><AlertDescription className="whitespace-pre-line text-xs">{deviceError.message}</AlertDescription></Alert>}
     </div>
   );

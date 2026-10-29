@@ -1,6 +1,6 @@
 {
     "name": "xx",
-    "version": "0.8.9",
+    "version": "0.8.10",
     "private": true,
     "main": "electron/main.js",
     "scripts": {

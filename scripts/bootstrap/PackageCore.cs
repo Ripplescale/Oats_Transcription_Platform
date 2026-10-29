@@ -16,6 +16,7 @@ namespace OatsSetup {
     public sealed class Bundle {
         public int schema; public string id; public string payload_id; public string app_version; public string payload_manifest_sha256;
         public string runtime_manifest_sha256; public long runtime_bytes;
+        public string app_installer_sha256; public long app_installer_bytes;
         public long installed_bytes; public Asset[] parts;
     }
     public sealed class PayloadFile { public string path; public long size; public string sha256; }
@@ -23,6 +24,7 @@ namespace OatsSetup {
 
     public static class PackageCore {
         public const long MaxPart = 1500L * 1024 * 1024;
+        public const long MaxInstaller = 512L * 1024 * 1024;
         public static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
         static readonly Regex HashPattern = new Regex("^[a-f0-9]{64}$");
         static readonly Regex Reserved = new Regex("^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", RegexOptions.IgnoreCase);
@@ -55,6 +57,7 @@ namespace OatsSetup {
             string payloadId = b.payload_id ?? b.id;
             if (!Regex.IsMatch(payloadId, "^[a-f0-9]{20}$")) throw new IOException("Invalid payload release identity.");
             if (b.runtime_manifest_sha256 != null && (!HashPattern.IsMatch(b.runtime_manifest_sha256) || b.runtime_bytes < 1 || b.runtime_bytes > 32L * 1024 * 1024)) throw new IOException("Invalid Microsoft runtime manifest.");
+            if (b.app_installer_sha256 != null || b.app_installer_bytes != 0) ValidateAppInstaller(b);
             for (int i = 0; i < b.parts.Length; i++) {
                 Asset a = b.parts[i];
                 if (a == null || a.name != "oats-runtime-" + payloadId + ".zip.part" + (i + 1).ToString("000") || !names.Add(a.name) || a.size < 1 || a.size > MaxPart || !HashPattern.IsMatch(a.sha256 ?? "")) throw new IOException("Invalid setup part.");
@@ -62,9 +65,81 @@ namespace OatsSetup {
                 if (a.url != expected) throw new IOException("Unexpected setup download address.");
             }
         }
+        public static void ValidateAppInstaller(Bundle b) {
+            if (b == null || b.app_version == null || b.app_version.Length > 32 || !Regex.IsMatch(b.app_version, "^0\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
+                || !HashPattern.IsMatch(b.app_installer_sha256 ?? "") || b.app_installer_bytes < 3 || b.app_installer_bytes > MaxInstaller)
+                throw new IOException("Setup needs a verified current app installer. Download the current Oats-Setup.exe.");
+        }
+        public static string PublishAppInstaller(Bundle b, Stream input, string package) {
+            ValidateAppInstaller(b);
+            string directory = LongPath(Path.Combine(package, "setup")); NoLinks(directory); Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, "oats-" + b.app_version + "-" + b.app_installer_sha256.Substring(0, 16) + ".exe"); NoLinks(path);
+            if (File.Exists(path)) {
+                if (new FileInfo(path).Length != b.app_installer_bytes || HashFile(path) != b.app_installer_sha256) throw new IOException("An existing app installer differs. It was preserved.");
+                return path;
+            }
+            if (input == null) throw new IOException("The current app installer is missing from setup.");
+            string temporary = Path.Combine(directory, ".oats-app-" + Guid.NewGuid().ToString("N") + ".tmp");
+            try {
+                using (FileStream output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None)) {
+                    byte[] block = new byte[1024 * 1024]; int count; long written = 0;
+                    while ((count = input.Read(block, 0, block.Length)) > 0) {
+                        written = checked(written + count);
+                        if (written > b.app_installer_bytes) throw new IOException("The app installer exceeds its verified size.");
+                        output.Write(block, 0, count);
+                    }
+                    if (written != b.app_installer_bytes) throw new IOException("The app installer resource is incomplete.");
+                    output.Flush(true);
+                }
+                using (FileStream check = File.OpenRead(temporary)) {
+                    if (check.ReadByte() != 'M' || check.ReadByte() != 'Z') throw new IOException("The app installer is not a Windows executable.");
+                }
+                if (HashFile(temporary) != b.app_installer_sha256) throw new IOException("The app installer failed its integrity check.");
+                File.Move(temporary, path);
+                return path;
+            } finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        }
         public static bool Verified(string path, Asset a) {
             NoLinks(path);
             return File.Exists(path) && new FileInfo(path).Length == a.size && HashFile(path) == a.sha256;
+        }
+        public static long RemainingDownloadBytes(Asset[] parts, string folder) {
+            long remaining = 0;
+            foreach (Asset a in parts) {
+                string final = Path.Combine(folder, a.name), partial = final + ".partial";
+                if (Verified(final, a)) continue;
+                if (File.Exists(final)) throw new IOException("A downloaded part failed verification. It was preserved: " + a.name);
+                NoLinks(partial);
+                long offset = File.Exists(partial) ? new FileInfo(partial).Length : 0;
+                if (offset > a.size) throw new IOException("Partial download is larger than expected.");
+                remaining = checked(remaining + a.size - offset);
+            }
+            return remaining;
+        }
+        public static long RemainingExtractionBytes(Payload payload, string root) {
+            root = LongPath(root); NoLinks(root); long remaining = 0;
+            foreach (PayloadFile file in payload.files) {
+                string path = Path.Combine(root, Relative(file.path).Replace('/', Path.DirectorySeparatorChar)); NoLinks(path);
+                if (File.Exists(path)) {
+                    if (new FileInfo(path).Length != file.size || HashFile(path) != file.sha256) throw new IOException("Existing setup file differs; preserved: " + file.path);
+                } else remaining = checked(remaining + file.size);
+            }
+            return remaining;
+        }
+        public static string PublishConfigureHelper(string root, byte[] bytes) {
+            string hash; using (MemoryStream stream = new MemoryStream(bytes)) hash = Hash(stream);
+            string directory = Path.Combine(root, "setup"); NoLinks(directory); Directory.CreateDirectory(directory);
+            string file = Path.Combine(directory, "configure-" + hash.Substring(0, 16) + ".py"); NoLinks(file);
+            if (File.Exists(file)) {
+                if (HashFile(file) != hash) throw new IOException("An existing setup helper differs. It was preserved.");
+                return file;
+            }
+            string temporary = Path.Combine(directory, ".oats-helper-" + Guid.NewGuid().ToString("N") + ".tmp");
+            try {
+                using (FileStream output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { output.Write(bytes, 0, bytes.Length); output.Flush(true); }
+                File.Move(temporary, file);
+            } finally { if (File.Exists(temporary)) File.Delete(temporary); }
+            return file;
         }
         public static async Task Download(Asset a, string folder, HttpClient http, Action<long> progress, CancellationToken cancel) {
             cancel.ThrowIfCancellationRequested();

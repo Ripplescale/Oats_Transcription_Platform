@@ -28,6 +28,7 @@ import { NoteLibrary } from '@/components/NoteLibrary';
 import { LiveNoteEditor } from '@/components/LiveNoteEditor';
 import { useLocalWorkflow } from '@/contexts/LocalWorkflowContext';
 import { invoke } from '@tauri-apps/api/core';
+import { registerUpdateSaveGuard } from '@/lib/update-safety';
 
 function HomeContent() {
   // Local page state (not moved to contexts)
@@ -109,6 +110,13 @@ function HomeContent() {
       await refetchMeetings(); window.dispatchEvent(new Event('xx-projects-updated'));
     } catch (reason) { toast.error('Title could not be saved', { description: String(reason) }); }
   };
+  const saveTitle = useRef(renameNote);
+  saveTitle.current = renameNote;
+  useEffect(() => registerUpdateSaveGuard(async () => {
+    if (!titleDirty.current) return;
+    await saveTitle.current();
+    if (titleDirty.current) throw new Error('The note title could not be saved. Try saving it before restarting.');
+  }), []);
 
   useEffect(() => {
     // Track page view
@@ -234,7 +242,7 @@ function HomeContent() {
         {status !== RecordingStatus.PROCESSING_TRANSCRIPTS && status !== RecordingStatus.SAVING && <div className="xx-recording-dock xx-note-dock">
           <RecordingControls isRecording={recordingState.isRecording} onRecordingStop={(callApi = true) => handleRecordingStop(callApi)} onRecordingStart={handleRecordingStart} onTranscriptReceived={() => {}} onStopInitiated={() => setIsStopping(true)} barHeights={barHeights} onTranscriptionError={message => showModal('errorAlert', message)} isRecordingDisabled={isRecordingDisabled} isParentProcessing={isProcessingStop} selectedDevices={selectedDevices} meetingName={meetingTitle} />
           <button className="xx-transcript-toggle" aria-label={transcriptOpen ? 'Hide transcript' : 'Show transcript'} aria-controls="live-transcript-drawer" aria-expanded={transcriptOpen} onClick={() => setTranscriptOpen(!transcriptOpen)}><Mic size={15} />Transcript{transcriptOpen ? <ChevronDown size={15} /> : <ChevronUp size={15} />}</button>
-          <span className="xx-recording-status" title="Audio is saved while Trelis prepares the transcript. The first text can take about a minute.">{recordingState.isPaused ? 'Paused' : recordingState.isRecording ? run?.job?.segments?.length ? 'Listening' : 'Listening · preparing transcript' : run?.meetingId ? 'Audio saved' : 'Not recording'}</span>
+          <span className="xx-recording-status" title={run?.preferences.timing === 'after-recording' ? 'Audio is saved while you record. This PC prepares the transcript after you finish.' : 'Audio is saved while Trelis prepares the transcript. Model startup can delay the first text.'}>{recordingState.isPaused ? 'Paused' : recordingState.isRecording ? run?.preferences.timing === 'after-recording' ? 'Listening · transcript after Finish' : run?.job?.segments?.length ? 'Listening' : 'Listening · preparing transcript' : run?.meetingId ? 'Audio saved' : 'Not recording'}</span>
           <details className="xx-recording-options xx-dock-options"><summary aria-label="Recording options" title="Recording options"><SlidersHorizontal size={16} /></summary><div><LocalTranscriptionPanel /></div></details>
         </div>}
         <StatusOverlays isProcessing={status === RecordingStatus.PROCESSING_TRANSCRIPTS && !recordingState.isRecording} isSaving={status === RecordingStatus.SAVING} sidebarCollapsed={sidebarCollapsed} />

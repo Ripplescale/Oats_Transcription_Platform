@@ -15,13 +15,16 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import secrets
+import shutil
 import stat
 import subprocess
 import sys
+import tomllib
 import zipfile
 
 REPO = Path(__file__).resolve().parents[2]
 MAX_PART = 1500 * 1024 * 1024
+MAX_INSTALLER = 512 * 1024 * 1024
 CPU_SHA = "f9ec6c52a2e949b62ab51fa21d0d497958f9e41c3010c157c4e42932d5316f3c"
 APP_SHA = "15de3ba739bafe69a370f7d4a7e98458ca23716a07c7b5540915bf224bed4644"
 
@@ -345,13 +348,73 @@ def embed_msvc(manifest, folder, inputs):
     (folder / "bundle.json").write_bytes(encoded(manifest))
 
 
-def compile_setup(manifest, folder):
+def source_app_version():
+    version = read(REPO / "frontend/package.json")["version"]
+    with (REPO / "frontend/src-tauri/Cargo.toml").open("rb") as source:
+        native = tomllib.load(source)["package"]["version"]
+    if (not re.fullmatch(r"0\.(0|[1-9]\d*)\.(0|[1-9]\d*)", version)
+            or native != version or read(REPO / "frontend/src-tauri/tauri.conf.json")["version"] != version):
+        raise ValueError("Source app versions must agree before building complete setup")
+    return version
+
+
+def verify_app_installer(installer, feed, public_key, node=None):
+    """Use the normal updater's cryptographic and signed-version verifier."""
+    installer, feed, public_key = (Path(p).resolve(strict=True) for p in (installer, feed, public_key))
+    if not 3 <= installer.stat().st_size <= MAX_INSTALLER:
+        raise ValueError("The signed app installer is empty or exceeds the 512 MiB limit")
+    node = node or shutil.which("node")
+    if not node:
+        raise ValueError("Maintainers need Node to verify the signed app installer; pass --node")
+    checked = subprocess.run([str(node), str(REPO / "scripts/windows-update-feed.cjs"), "verify",
+                              str(feed), str(installer), str(public_key)], capture_output=True,
+                             text=True, timeout=90)
+    if checked.returncode:
+        raise ValueError("The app installer failed updater signature verification: " + checked.stderr[-2000:])
+    result = json.loads(checked.stdout)
+    version = source_app_version()
+    if result.get("version") != version:
+        raise ValueError("The signed installer must match the current source app version " + version)
+    if result.get("bytes") != installer.stat().st_size or result.get("sha256") != digest(installer):
+        raise ValueError("The signed installer changed during verification")
+    return {"version": version, "bytes": result["bytes"], "sha256": result["sha256"]}
+
+
+def add_installer_arguments(parser):
+    parser.add_argument("--app-installer", type=Path, required=True, help="Current signed Windows updater installer")
+    parser.add_argument("--update-feed", type=Path, required=True, help="Matching signed-version latest.json")
+    parser.add_argument("--public-key", type=Path, required=True, help="Trusted existing oats updater public key")
+    parser.add_argument("--node", type=Path, help="Maintainer Node executable; recipients never need Node")
+
+
+def compile_setup(manifest, folder, *, app_installer=None, update_feed=None, public_key=None, node=None, allow_fixture=False):
+    folder = Path(folder)
+    overlay = folder / ".build/app-installer.exe"
+    if not allow_fixture:
+        if app_installer is None or update_feed is None or public_key is None:
+            raise ValueError("Building complete setup requires the current signed installer, matching feed and trusted public key")
+        verified = verify_app_installer(app_installer, update_feed, public_key, node)
+        # The archived app remains immutable and is never launched by Setup.
+        manifest.setdefault("payload_app_version", manifest["app_version"])
+        manifest.update(app_version=verified["version"], app_installer_bytes=verified["bytes"],
+                        app_installer_sha256=verified["sha256"])
+        overlay.parent.mkdir(exist_ok=True)
+        with overlay.open("xb") as output, Path(app_installer).open("rb") as source:
+            shutil.copyfileobj(source, output, 1024 * 1024)
+        if overlay.stat().st_size != verified["bytes"] or digest(overlay) != verified["sha256"]:
+            raise ValueError("The app installer changed before embedding")
+        (folder / "bundle.json").write_bytes(encoded(manifest))
+    elif manifest.get("app_installer_sha256"):
+        raise ValueError("Fixture-only compilation cannot claim a verified installer overlay")
     framework = Path(os.environ.get("WINDIR", "C:/Windows")) / "Microsoft.NET/Framework64/v4.0.30319"
     args = [str(framework / "csc.exe"), "/nologo", "/target:winexe", "/platform:x64", "/optimize+",
             "/out:" + str(folder / "Oats-Setup.exe"), "/resource:" + str(folder / "bundle.json") + ",bundle.json",
             "/win32icon:" + str(REPO / "frontend/src-tauri/icons/icon.ico")]
     args.append("/win32manifest:" + str(Path(__file__).with_name("setup.manifest")))
     args.append("/resource:" + str(folder / "msvc-runtime.zip") + ",msvc-runtime.zip")
+    args.append("/resource:" + str(Path(__file__).with_name("configure.py")) + ",configure.py")
+    if not allow_fixture:
+        args.append("/resource:" + str(overlay) + ",app-installer.exe")
     for assembly in ("System.Net.Http", "System.Web.Extensions", "System.IO.Compression", "System.IO.Compression.FileSystem", "System.Windows.Forms", "System.Drawing"):
         args.append("/reference:" + str(framework / (assembly + ".dll")))
     args.extend(str(Path(__file__).with_name(name)) for name in ("PackageCore.cs", "Setup.cs"))
@@ -369,7 +432,9 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--id", default=None)
     parser.add_argument("--reuse-bundle", type=Path, help="Reuse a verified immutable GitHub payload release; rebuild only the small bootstrap")
+    add_installer_arguments(parser)
     args = parser.parse_args()
+    verify_app_installer(args.app_installer, args.update_feed, args.public_key, args.node)
     identity = args.id or secrets.token_hex(10)
     if not re.fullmatch("[a-f0-9]{20}", identity):
         raise ValueError("Bundle identity must be 20 hex characters")
@@ -387,7 +452,8 @@ def main():
         manifest = archive(sources, folder, identity)
         file_count = len(sources)
     embed_msvc(manifest, folder, args.inputs)
-    compile_setup(manifest, folder)
+    compile_setup(manifest, folder, app_installer=args.app_installer, update_feed=args.update_feed,
+                  public_key=args.public_key, node=args.node)
     print(json.dumps({"bundle_id": identity, "files": file_count, "download_bytes": sum(p["size"] for p in manifest["parts"]), "installed_bytes": manifest["installed_bytes"]}), flush=True)
 
 

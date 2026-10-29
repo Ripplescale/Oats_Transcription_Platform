@@ -28,13 +28,13 @@ namespace OatsSetup {
             bundle = b; Text = "oats setup"; ClientSize = new Size(560, 340); FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false; StartPosition = FormStartPosition.CenterScreen; BackColor = Color.FromArgb(255, 252, 248); Font = new Font("Segoe UI", 10);
             title.SetBounds(24, 20, 510, 32); title.Text = "Set up oats on this PC"; title.Font = new Font("Segoe UI", 17, FontStyle.Bold);
-            detail.SetBounds(24, 61, 510, 72); detail.Text = "Recording, notes, Trelis dictation and transcription, and Apex fallback.\nDownload once from GitHub. Keep this entire folder for offline setup.\nOptional speaker identification is not included in this package.";
+            detail.SetBounds(24, 61, 510, 72); detail.Text = "Click Install oats to download and set up everything on this PC.\nKeep the download folder if you want to reuse it on another PC.\nAlready downloaded? Setup uses the files in the folder below.";
             folder.SetBounds(24, 141, 418, 26); folder.Text = AppDomain.CurrentDomain.BaseDirectory;
             browse.SetBounds(452, 140, 84, 28); browse.Text = "Browse…";
             status.SetBounds(24, 183, 512, 43); status.Text = "App " + b.app_version + " · " + GiB(b.parts.Sum(x => x.size)) + " download · " + GiB(b.installed_bytes) + " installed.\nChoose a folder with enough free space for all downloaded parts.";
             bar.SetBounds(24, 231, 512, 12);
-            install.SetBounds(24, 271, 182, 38); install.Text = "Download and install";
-            save.SetBounds(216, 271, 192, 38); save.Text = "Save for offline setup";
+            install.SetBounds(24, 271, 182, 38); install.Text = "Install oats";
+            save.SetBounds(216, 271, 192, 38); save.Text = "Download for another PC";
             cancel.SetBounds(420, 271, 116, 38); cancel.Text = "Close";
             Controls.AddRange(new Control[] { title, detail, folder, browse, status, bar, install, save, cancel });
             browse.Click += delegate { using (FolderBrowserDialog d = new FolderBrowserDialog()) { d.Description = "Keep the setup program and all its downloaded parts together"; d.SelectedPath = folder.Text; if (d.ShowDialog(this) == DialogResult.OK) folder.Text = d.SelectedPath; } };
@@ -76,6 +76,17 @@ namespace OatsSetup {
             return false;
         }
         static string Quote(string value) { if (value.Contains("\"")) throw new IOException("Invalid setup path."); return "\"" + value + "\""; }
+        static string InstallConfigureHelper(string target) {
+            // Reused immutable model parts may contain an older helper. Carry
+            // the current helper in the small setup EXE without rewriting it.
+            byte[] bytes;
+            using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("configure.py"))
+            using (MemoryStream buffer = new MemoryStream()) {
+                if (stream == null) throw new IOException("Setup is missing its speech check helper.");
+                stream.CopyTo(buffer); bytes = buffer.ToArray();
+            }
+            return PackageCore.PublishConfigureHelper(target, bytes);
+        }
         async Task Run(bool doInstall) {
             if (busy) return; cancellation = new CancellationTokenSource(); busy = true;
             install.Enabled = save.Enabled = browse.Enabled = folder.Enabled = false; cancel.Text = "Cancel";
@@ -85,7 +96,7 @@ namespace OatsSetup {
                 Report("Checking previously downloaded parts…", 0, 1);
                 // Estimate disk space from lengths; Download performs the full
                 // hash check once, including for offline parts.
-                long remaining = bundle.parts.Where(a => !File.Exists(Path.Combine(cache, a.name)) || new FileInfo(Path.Combine(cache, a.name)).Length != a.size).Sum(a => a.size);
+                long remaining = await Task.Run(() => PackageCore.RemainingDownloadBytes(bundle.parts, cache));
                 Space(cache, remaining);
                 ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
                 using (HttpClient http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = true, MaxAutomaticRedirections = 10 }) { Timeout = TimeSpan.FromHours(2) }) {
@@ -101,18 +112,18 @@ namespace OatsSetup {
                     if (File.Exists(saved)) { if (PackageCore.HashFile(saved) != PackageCore.HashFile(self)) throw new IOException("A different setup program already exists in this folder. Choose a separate folder."); }
                     else File.Copy(self, saved);
                 }
-                if (!doInstall) { Report("Download complete. Copy this entire folder to the offline PC, then open Oats-Setup.exe there. No installation was performed.", 1, 1); return; }
+                if (!doInstall) { Report("Download complete. Copy this entire folder to the other PC. Open Oats-Setup.exe there and click Install oats.", 1, 1); return; }
                 if (Process.GetProcessesByName("xx").Length > 0) throw new IOException("Save your work and close oats, including its tray icon, before installing on this PC.");
                 string data = Environment.GetEnvironmentVariable("STTAPP_DATA_DIR");
                 if (String.IsNullOrWhiteSpace(data)) data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "STTApp");
                 data = Path.GetFullPath(data); PackageCore.NoLinks(data);
-                if (File.Exists(Path.Combine(data, "runtime.json")) || File.Exists(Path.Combine(data, "data-location.json"))) throw new IOException("This PC already has an oats configuration. It was preserved. Use About → Check for updates for this installation; use this complete setup on the new PC.");
-                Space(data, bundle.installed_bytes + bundle.runtime_bytes);
+                if (File.Exists(Path.Combine(data, "runtime.json")) || File.Exists(Path.Combine(data, "dictation-runtime.json")) || File.Exists(Path.Combine(data, "data-location.json"))) throw new IOException("This PC already has an oats configuration. It was preserved. Use About → Check for updates for this installation; use this complete setup on the new PC.");
                 string target = Path.Combine(data, "packages", bundle.id); PackageCore.NoLinks(target);
                 await Task.Run(delegate {
                     using (SplitStream stream = new SplitStream(bundle.parts.Select(a => Path.Combine(cache, a.name))))
                     using (ZipArchive zip = new ZipArchive(stream, ZipArchiveMode.Read)) {
                         Payload p = PackageCore.ReadPayload(zip, bundle);
+                        Space(data, PackageCore.RemainingExtractionBytes(p, target) + bundle.runtime_bytes);
                         PackageCore.Extract(zip, p, target, x => Report("Preparing verified local speech components…\n" + GiB(x) + " of " + GiB(bundle.installed_bytes), x, bundle.installed_bytes), cancellation.Token);
                     }
                     using (Stream runtime = Assembly.GetExecutingAssembly().GetManifestResourceStream("msvc-runtime.zip"))
@@ -120,6 +131,7 @@ namespace OatsSetup {
                         Bundle embedded = new Bundle { installed_bytes = bundle.runtime_bytes, payload_manifest_sha256 = bundle.runtime_manifest_sha256 };
                         Payload p = PackageCore.ReadPayload(zip, embedded);
                         if (p.files.Any(f => !(f.path.StartsWith("python/") || f.path.StartsWith("tools/whisper-cpu/")) || !f.path.EndsWith(".dll"))) throw new IOException("Unexpected Microsoft runtime content.");
+                        Space(data, PackageCore.RemainingExtractionBytes(p, target));
                         PackageCore.Extract(zip, p, target, x => Report("Preparing included Microsoft speech-runtime dependencies…", x, bundle.runtime_bytes), cancellation.Token);
                     }
                 });
@@ -127,7 +139,7 @@ namespace OatsSetup {
                 // Both actual adapters refuse to start if setup omits them.
                 RuntimeDirectories.Ensure(target);
                 cancellation.Token.ThrowIfCancellationRequested(); handoff = true; cancel.Enabled = false;
-                string python = Path.Combine(target, @"python\python.exe"); string configure = Path.Combine(target, @"setup\configure.py");
+                string python = Path.Combine(target, @"python\python.exe"); string configure = InstallConfigureHelper(target);
                 Report("Checking Python, speech libraries, and available hardware…", 0, 1);
                 await Task.Run(() => Child(python, "-I -B " + Quote(configure) + " --root " + Quote(data) + " --probe", target));
                 var probe = PackageCore.Json.Deserialize<System.Collections.Generic.Dictionary<string, object>>(File.ReadAllText(Path.Combine(target, "probe.json")));
@@ -136,11 +148,30 @@ namespace OatsSetup {
                 Report("Checking the speech models and preparing local configuration…", 0, 1);
                 string configArgs = "-I -B " + Quote(configure) + " --root " + Quote(data) + " --prepare --device " + (gpu ? "GPU" : "CPU");
                 await Task.Run(() => Child(python, configArgs, target));
+                Report("Testing Trelis and Apex on this PC. The first model load can take a few minutes…", 0, 1);
+                bool retryCpu = false;
+                try {
+                    await Task.Run(() => Child(python, "-I -B " + Quote(configure) + " --root " + Quote(data) + " --smoke", target));
+                } catch (Exception error) {
+                    string failurePath = Path.Combine(target, "speech-check-failure.json");
+                    PackageCore.NoLinks(failurePath);
+                    var failed = File.Exists(failurePath) ? PackageCore.Json.Deserialize<System.Collections.Generic.Dictionary<string, object>>(File.ReadAllText(failurePath)) : null;
+                    if (!gpu || failed == null || !failed.ContainsKey("model") || !Object.Equals(failed["model"], "trelis") || MessageBox.Show(this, "Trelis could not run with this PC's GPU.\n\nTry CPU mode? It can be slower, especially for dictation.\n\n" + error.Message, "oats speech check", MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes) throw;
+                    retryCpu = true;
+                }
+                if (retryCpu) {
+                    await Task.Run(() => Child(python, "-I -B " + Quote(configure) + " --root " + Quote(data) + " --prepare --device CPU", target));
+                    await Task.Run(() => Child(python, "-I -B " + Quote(configure) + " --root " + Quote(data) + " --smoke", target));
+                }
                 if (!WebViewInstalled()) { Report("Installing the included Microsoft WebView2 runtime…", 0, 1); await Task.Run(() => Child(Path.Combine(target, @"setup\WebView2.exe"), "/silent /install", target)); }
                 Report("Installing oats " + bundle.app_version + "…", 0, 1);
-                await Task.Run(() => Child(Path.Combine(target, @"setup\oats.exe"), "/S", target));
+                Space(data, bundle.app_installer_bytes);
+                string installer;
+                using (Stream resource = Assembly.GetExecutingAssembly().GetManifestResourceStream("app-installer.exe"))
+                    installer = PackageCore.PublishAppInstaller(bundle, resource, target);
+                await Task.Run(() => Child(installer, "/S", target));
                 await Task.Run(() => Child(python, "-I -B " + Quote(configure) + " --root " + Quote(data) + " --activate", target));
-                Report("oats is ready. Open oats from Start. Your downloaded folder can set up another compatible PC offline.", 1, 1);
+                Report("oats is ready. Open oats from the Windows Start menu.", 1, 1);
             } catch (OperationCanceledException) { Report("Cancelled. Downloaded parts are retained; choose the same folder to resume.", 0, 1); }
             catch (Exception error) { Report(error.Message, 0, 1); MessageBox.Show(this, error.Message, "oats setup", MessageBoxButtons.OK, MessageBoxIcon.Information); }
             finally { handoff = false; busy = false; install.Enabled = save.Enabled = browse.Enabled = folder.Enabled = cancel.Enabled = true; cancel.Text = "Close"; cancellation.Dispose(); }
@@ -156,6 +187,8 @@ namespace OatsSetup {
                 if (!first) { MessageBox.Show("oats setup is already open.", "oats setup"); return; }
                 Bundle b; using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("bundle.json")) using (StreamReader reader = new StreamReader(stream)) b = PackageCore.Json.Deserialize<Bundle>(reader.ReadToEnd());
                 PackageCore.Validate(b);
+                PackageCore.ValidateAppInstaller(b);
+                if (Assembly.GetExecutingAssembly().GetManifestResourceInfo("app-installer.exe") == null) throw new IOException("Setup is missing its current app installer. Download the current Oats-Setup.exe.");
                 if (b.runtime_manifest_sha256 == null || b.runtime_bytes < 1) throw new IOException("The complete setup is missing its app-local Microsoft runtime.");
                 Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false); Application.Run(new SetupWindow(b));
                 owner.ReleaseMutex();

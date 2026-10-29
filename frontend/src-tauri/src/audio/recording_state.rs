@@ -160,7 +160,7 @@ impl RecordingState {
 
     pub fn stop_recording(&self) {
         if self.is_recording.swap(false, Ordering::SeqCst) {
-            *self.recording_end_seconds.lock().unwrap() = self.recording_start.lock().unwrap().map(|start| start.elapsed().as_secs_f64());
+            *self.recording_end_seconds.lock().unwrap() = self.recording_start.lock().unwrap().map(|start| start.elapsed().as_secs_f64().min(super::durable_capture::MAX_CAPTURE_SECONDS));
         }
         // Barrier: any callback that saw is_active=true has now enqueued its
         // source data before the writer's producer can be closed.
@@ -248,13 +248,21 @@ impl RecordingState {
     }
 
     pub fn capture_source(&self, track: &str, rate: u32, timestamp: f64, samples: &[f32]) -> bool {
-        if let Some(sink) = self.capture_sink.lock().unwrap().as_ref() {
-            if self.is_active() { sink.audio(track, rate, timestamp, samples); }
+        let reached_limit = rate > 0 && timestamp + samples.len() as f64 / rate as f64 >= super::durable_capture::MAX_CAPTURE_SECONDS;
+        let captured = if let Some(sink) = self.capture_sink.lock().unwrap().as_ref() {
+            if self.is_active() {
+                let permitted = if rate > 0 { ((super::durable_capture::MAX_CAPTURE_SECONDS - timestamp).max(0.0) * rate as f64).floor() as usize } else { 0 };
+                let count = samples.len().min(permitted);
+                if count > 0 { sink.audio(track, rate, timestamp, &samples[..count]); }
+            }
             // The isolated worker reads durable chunks. Do not feed the legacy
             // VAD/provider path when a source recorder owns this session.
-            return true;
-        }
-        false
+            true
+        } else { false };
+        // Stop outside the callback barrier mutex. The health monitor schedules
+        // normal finalization and an explicit limit notification.
+        if captured && reached_limit { self.stop_recording(); }
+        captured
     }
 
     pub fn capture_event(&self, kind: &str, details: serde_json::Value) {
@@ -455,5 +463,22 @@ impl Clone for RecordingStats {
             total_duration: self.total_duration,
             last_activity: self.last_activity,
         }
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+    #[test]
+    fn reaching_duration_limit_stops_outside_callback_barrier_without_fabricating_audio() {
+        let root = tempfile::tempdir().unwrap();
+        let mut recorder = super::super::durable_capture::DurableRecorder::start(root.path(), None, None, None).unwrap();
+        let state = RecordingState::new();
+        state.set_capture_sink(recorder.sink.clone());
+        state.start_recording().unwrap();
+        assert!(state.capture_source("system", 16000, super::super::durable_capture::MAX_CAPTURE_SECONDS, &[]));
+        assert!(!state.is_recording());
+        assert!(state.get_recording_duration().unwrap() <= super::super::durable_capture::MAX_CAPTURE_SECONDS);
+        assert!(recorder.finish(0.0).unwrap_err().to_string().contains("No committed source audio"));
     }
 }

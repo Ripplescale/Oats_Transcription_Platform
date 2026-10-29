@@ -67,13 +67,14 @@ pub struct Snapshot {
     text: Option<String>, message: Option<String>, microphone: Option<String>,
     live_typing: bool, inserted_characters: usize, delivery_message: Option<String>,
     backend: String, draft_text: Option<String>,
+    streaming_message: Option<String>,
     shortcuts: Shortcuts, available: bool,
 }
 impl Default for Snapshot {
     fn default() -> Self {
         Self { phase: "idle".into(), session_id: None, elapsed_seconds: 0.0, level: 0.0,
             text: None, message: None, microphone: None, live_typing: false, inserted_characters: 0,
-            delivery_message: None, backend: "trelis".into(), draft_text: None,
+            delivery_message: None, backend: "trelis".into(), draft_text: None, streaming_message: None,
             shortcuts: Shortcuts::default(), available: cfg!(windows) }
     }
 }
@@ -382,18 +383,18 @@ impl Dictation {
         let live_cancelled = cancelled.clone();
         let live_owner = self.clone();
         let live_id = id.to_owned();
-        let schedule = if engine::backend(&runtime.config).ok() == Some("faster_whisper") {
-            pipeline::PreviewSchedule::streaming()
-        } else { pipeline::PreviewSchedule::new() };
+        let schedule = pipeline::PreviewSchedule::streaming();
         let pipeline = match pipeline::Pipeline::start_stream(cancelled.clone(), move |wav, final_request| {
             transcribe(&decoding_id, wav, &decoding_cancelled, final_request)
         }, move |transcript, final_request| {
             let mut state = live_delivery.lock().unwrap_or_else(|p| p.into_inner());
             if live_cancelled.load(Ordering::Acquire) { return; }
+            if let Some(error) = &transcript.delivery_error { state.ledger.interrupt(error.clone()); }
             state.observe(&transcript.text, final_request, &live_cancelled);
             live_owner.update(&live_id, |s| {
                 s.text = if transcript.text.trim().is_empty() { None } else { Some(transcript.text.clone()) };
                 s.draft_text = if final_request { None } else { transcript.draft_text.clone().filter(|draft| !draft.trim().is_empty()) };
+                s.streaming_message = transcript.streaming_message.clone();
                 s.inserted_characters = state.ledger.inserted_characters();
                 s.live_typing = state.ledger.blocked_reason().is_none();
                 s.delivery_message = state.ledger.blocked_reason().map(str::to_owned);
@@ -494,6 +495,8 @@ fn transcribe(session_id: &str, wav: &[u8], cancelled: &AtomicBool, final_reques
     match result {
         Ok(Some(result)) => result["text"].as_str().map(|text| Some(pipeline::Transcript {
             text: text.to_owned(), draft_text: result.get("draft_text").and_then(Value::as_str).map(str::to_owned),
+            streaming_message: result.get("streaming_message").and_then(Value::as_str).map(str::to_owned),
+            delivery_error: result.get("delivery_error").and_then(Value::as_str).map(str::to_owned),
         }))
             .ok_or_else(|| "The local dictation result has no text.".into()),
         other => { slot.take(); other.map(|_| None) }

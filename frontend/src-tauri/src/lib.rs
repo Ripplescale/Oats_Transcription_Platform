@@ -619,6 +619,8 @@ pub fn run() {
             local_workspace::save_project_vault,
             audio::recording_commands::list_recoverable_captures,
             audio::recording_commands::recover_local_capture,
+            audio::recording_commands::delete_recoverable_capture,
+            audio::recording_commands::restart_after_capture_failure,
             local_transcription::get_local_stt_profiles,
             local_transcription::ensure_capture_meeting,
             local_transcription::get_speaker_setup_status,
@@ -873,6 +875,10 @@ pub fn run() {
                         }
                     });
                     log::info!("Application cleanup complete");
+                }
+                tauri::RunEvent::ExitRequested { api, .. } if audio::recording_commands::capture_in_progress() && !audio::recording_commands::recovery_restart_requested() => {
+                    api.prevent_exit();
+                    tray::request_quit(_app_handle);
                 }
                 _ => {}
             }

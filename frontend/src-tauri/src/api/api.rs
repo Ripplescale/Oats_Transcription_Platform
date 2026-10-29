@@ -747,6 +747,7 @@ pub async fn api_delete_meeting<R: Runtime>(
     meeting_id: String,
     auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let _update_lease = crate::updates::start_lease()?;
     log_info!(
         "api_delete_meeting called for meeting_id(native): {}, auth_token: {}",
         meeting_id,
@@ -755,6 +756,7 @@ pub async fn api_delete_meeting<R: Runtime>(
 
     let pool = state.db_manager.pool();
 
+    let _speech_deletion = crate::local_transcription::prepare_meeting_deletion(pool, &meeting_id).await?;
     match MeetingsRepository::delete_meeting(pool, &meeting_id).await {
         Ok(true) => {
             log_info!("Successfully deleted meeting {}", meeting_id);

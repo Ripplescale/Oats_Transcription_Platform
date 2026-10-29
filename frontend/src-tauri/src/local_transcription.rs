@@ -1,5 +1,5 @@
 //! Isolated local STT jobs. Recorder health never depends on a model process.
-use std::{collections::{HashMap, HashSet}, fs, path::{Path, PathBuf}, process::{Child, Command, Stdio}, sync::Mutex};
+use std::{collections::{HashMap, HashSet}, fs, path::{Path, PathBuf}, process::{Command, Stdio}, sync::Mutex, time::{Duration, Instant}};
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -9,8 +9,12 @@ use crate::{local_workspace::{data_root, valid_id}, state::AppState};
 mod worker_policy;
 use worker_policy::{WorkerActivity, WorkerKind};
 
-type WorkerChildren = HashMap<(WorkerKind, String), Child>;
+#[path = "local_worker_process.rs"]
+mod worker_process;
+use worker_process::WorkerProcess;
+type WorkerChildren = HashMap<(WorkerKind, String), WorkerProcess>;
 static CHILDREN: Lazy<Mutex<WorkerChildren>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static DELETING_SESSIONS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static JOB_START_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static RETENTION_JOBS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static RETENTION_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -140,7 +144,7 @@ fn local_stt_profiles(config: Option<&Value>) -> Vec<Value> {
             else if !supported {format!("Local worker needs setup or an update for {model_name} {seconds}s. Update the local STT runtime.")}
             else if model=="apex" {"Available as a separate fallback transcript".to_owned()}
             else if accelerated {format!("Local GPU runtime configured; {seconds}-second audio windows plus processing time")}
-            else {"GPU setup is needed for Trelis live transcription; Apex fallback is available".to_owned()};
+            else {"Local Trelis transcription runs after recording finishes on this runtime; Apex fallback is available".to_owned()};
         json!({"id":id,"model":model,"chunk_seconds":seconds,"available":available,
             "reason":reason,
             "language_modes":["hinglish","english"],"live_qualified":false,
@@ -183,6 +187,8 @@ fn capture_session(directory: &str) -> Result<(PathBuf, Value), String> {
 #[tauri::command]
 pub async fn ensure_capture_meeting(state: tauri::State<'_,AppState>, session_dir: String) -> Result<Value,String> {
     let (path,session) = capture_session(&session_dir)?;
+    if path.join("source-audio-deleted.json").exists() { return Err("This recovery recording's audio was deleted. Existing notes and transcripts are preserved.".into()); }
+    if DELETING_SESSIONS.lock().map_err(|e|e.to_string())?.contains(&path_key(&session_dir)) { return Err("This recording is being removed; no meeting was created.".into()); }
     // Reuse a previous recovery/import of this recording rather than duplicating it.
     let existing: Vec<(String,String,String)> = sqlx::query_as("SELECT id,title,folder_path FROM meetings WHERE folder_path IS NOT NULL ORDER BY created_at,id")
         .fetch_all(state.db_manager.pool()).await.map_err(|e|e.to_string())?;
@@ -286,6 +292,7 @@ fn worker_activity(children: &mut WorkerChildren) -> Result<WorkerActivity, std:
 fn launch_process(kind: WorkerKind, id: &str, config_file: &Path, dir: &Path) -> Result<(),String> {
     let _update_start = crate::updates::start_lease()?;
     let mut children = CHILDREN.lock().map_err(|e| e.to_string())?;
+    if crate::audio::recording_commands::recovery_restart_requested() { return Err("oats is restarting to recover the recording. Wait for it to reopen before starting speech processing.".into()); }
     if RETENTION_BUSY.load(std::sync::atomic::Ordering::SeqCst) { return Err("Finishing recording storage cleanup. Try again in a moment.".into()); }
     if crate::dictation::is_busy() { return Err("Finish or cancel dictation before starting local transcription.".into()); }
     if !worker_activity(&mut children).map_err(|e|e.to_string())?.admits(kind) {
@@ -298,6 +305,12 @@ fn launch_process(kind: WorkerKind, id: &str, config_file: &Path, dir: &Path) ->
     // Jobs keep their immutable original Python worker. Restore the exact
     // committed WAV bytes so even workers predating archive support can resume.
     let request = read(&dir.join("request.json"))?;
+    if request["session_dir"].as_str().map(|session| DELETING_SESSIONS.lock().map(|set| set.contains(&path_key(session))).unwrap_or(true)).unwrap_or(false) {
+        return Err("This conversation is being removed. Saved audio is preserved.".into());
+    }
+    if request["session_dir"].as_str().map(|session| Path::new(session).join("source-audio-deleted.json").exists()).unwrap_or(false) {
+        return Err("This recording's audio was deleted. Existing notes and transcripts are preserved; speech processing cannot resume.".into());
+    }
     if kind == WorkerKind::Transcription {
         let session = request["session_dir"].as_str().ok_or("Missing source session")?;
         let (session, _) = capture_session(session)?;
@@ -319,9 +332,86 @@ fn launch_process(kind: WorkerKind, id: &str, config_file: &Path, dir: &Path) ->
         .env("STTAPP_PARENT_PID",std::process::id().to_string());
     #[cfg(target_os="windows")]
     { use std::os::windows::process::CommandExt; command.creation_flags(worker_policy::windows_creation_flags(kind)); }
-    let child = command.spawn().map_err(|e| format!("Local worker could not start: {e}"))?;
+    let interruption = dir.join("worker-interruption.json");
+    if interruption.exists() { fs::remove_file(&interruption).map_err(|e| e.to_string())?; }
+    let mut child = WorkerProcess::spawn(&mut command).map_err(|e| format!("Local worker could not start safely: {e}"))?;
+    let generation = child.generation;
+    if kind == WorkerKind::Transcription {
+        let id = id.to_owned(); let dir = dir.to_owned();
+        if let Err(error) = std::thread::Builder::new().name("speech-worker-supervisor".into()).spawn(move || supervise_transcription(id, generation, dir)) {
+            let _ = child.kill();
+            return Err(format!("Could not supervise the local speech worker: {error}"));
+        }
+    }
     children.insert((kind, id.into()), child);
     Ok(())
+}
+
+const WORKER_STOP_GRACE: Duration = Duration::from_secs(8);
+const WORKER_STALL_LIMIT: Duration = Duration::from_secs(300);
+
+fn supervisor_action(stop_elapsed: Option<Duration>, unchanged: Duration, state: Option<&str>) -> Option<&'static str> {
+    if stop_elapsed.map(|elapsed| elapsed >= WORKER_STOP_GRACE).unwrap_or(false) { return Some("stopped"); }
+    // Waiting for live capture/context is legitimate idle time. Loading,
+    // inference and process teardown must eventually return or be retryable.
+    if unchanged >= WORKER_STALL_LIMIT && state != Some("waiting_for_audio") { return Some("timed_out"); }
+    None
+}
+
+fn supervisor_decision(stop_elapsed: Option<Duration>, unchanged: Duration, read_state: impl FnOnce() -> Option<String>) -> Option<&'static str> {
+    match supervisor_action(stop_elapsed, unchanged, None) {
+        Some("timed_out") => {
+            // Only a stale checkpoint needs inspection for legitimate live
+            // waiting. Stop-grace polls never parse a large transcript JSON.
+            let state = read_state();
+            supervisor_action(stop_elapsed, unchanged, state.as_deref())
+        }
+        action => action,
+    }
+}
+
+fn supervise_transcription(id: String, generation: uuid::Uuid, dir: PathBuf) {
+    let key = (WorkerKind::Transcription, id);
+    let status_path = dir.join("status.json");
+    let mut fingerprint = None;
+    let mut changed = Instant::now();
+    let mut stop_since = None;
+    loop {
+        std::thread::sleep(Duration::from_millis(250));
+        // Identity is the owned Child generation, never a PID/name lookup.
+        let live = match CHILDREN.lock() {
+            Ok(mut children) => match children.get_mut(&key) {
+                Some(child) if child.generation == generation => match child.try_wait() {
+                    Ok(status) => status.is_none(), Err(error) => { log::warn!("Speech worker exit probe failed: {error}"); true }
+                },
+                _ => false,
+            },
+            Err(_) => return,
+        };
+        if !live { return; }
+        let next = fs::metadata(&status_path).ok().map(|meta| (meta.modified().ok(), meta.len()));
+        if next != fingerprint { fingerprint = next; changed = Instant::now(); }
+        if dir.join("stop.request").is_file() { stop_since.get_or_insert_with(Instant::now); } else { stop_since = None; }
+        let elapsed = changed.elapsed();
+        if stop_since.is_none() && elapsed < WORKER_STALL_LIMIT { continue; }
+        let Some(reason) = supervisor_decision(stop_since.map(|at| at.elapsed()), elapsed, || {
+            read(&status_path).ok().and_then(|value|value["state"].as_str().map(str::to_owned))
+        }) else {
+            if elapsed >= WORKER_STALL_LIMIT { changed = Instant::now(); }
+            continue;
+        };
+        let Ok(mut children) = CHILDREN.lock() else { return; };
+        let Some(child) = children.get_mut(&key).filter(|child| child.generation == generation) else { return; };
+        if matches!(child.try_wait(), Ok(Some(_))) { return; }
+        if let Err(error) = child.kill() { log::warn!("Could not stop the owned speech worker: {error}"); continue; }
+        // Never rewrite the immutable Python checkpoint or its source identity.
+        // The last complete selection remains available for import and resume.
+        let marker = json!({"generation":generation,"reason":reason,"at":chrono::Utc::now().to_rfc3339()});
+        if let Err(error) = fs::write(dir.join("worker-interruption.json"), serde_json::to_vec(&marker).unwrap_or_default()) {
+            log::warn!("Could not save speech interruption detail: {error}");
+        }
+        return;
+    }
 }
 
 /// Claim dictation while holding the same lock used to launch every ASR/speaker
@@ -477,9 +567,7 @@ fn start_local_transcription_inner(session_dir: String, profile: String, languag
         }
         if role == "live-final" {
             let config = read(&config_path()?)?;
-            if config["models"]["trelis"]["backend"] != "openvino" || config["models"]["trelis"]["device"] != "GPU" {
-                return Err("Trelis live transcription needs the local GPU runtime. Recording is preserved; use Apex fallback or finish GPU setup.".into());
-            }
+            validate_trelis_timing(&config, &session)?;
         }
     }
     // Check only new jobs against today's worker declaration. Existing jobs
@@ -514,6 +602,12 @@ fn capture_ready_for_final(session: &Path) -> Result<bool, String> {
     let valid_duration = recovered["duration_seconds"].as_f64().map(|duration| duration.is_finite() && duration >= final_time).unwrap_or(false);
     Ok(metadata["status"] == "recovered" && valid_duration && recovered["verified"] == true
         && recovered["source_journal_sha256"] == format!("{:x}", Sha256::digest(&bytes)))
+}
+
+fn validate_trelis_timing(config: &Value, session: &Path) -> Result<(),String> {
+    let live_gpu=config["models"]["trelis"]["backend"] == "openvino" && config["models"]["trelis"]["device"] == "GPU";
+    if live_gpu || capture_ready_for_final(session)? { return Ok(()); }
+    Err("This Trelis runtime transcribes after recording. Finish or recover the saved recording first; Apex fallback is available while recording.".into())
 }
 
 fn validate_workflow_role(role: Option<&str>, profile: &str) -> Result<(), String> {
@@ -569,8 +663,9 @@ pub fn get_local_transcription_status(job_id: String) -> Result<Value, String> {
         Some(child) => child.try_wait().map_err(|e| e.to_string())?.is_some(),
         None => true,
     };
-    let result = project_transcription_checkpoint(&job_id, &request, checkpoint, exited);
+    let mut result = project_transcription_checkpoint(&job_id, &request, checkpoint, exited);
     drop(children);
+    project_supervised_interruption(&mut result, &dir, exited);
     if exited && result["state"] == "complete" {
         if let Some(session) = request["session_dir"].as_str() {
             schedule_completed_retention(job_id, session.to_owned(), false);
@@ -615,11 +710,140 @@ fn project_transcription_checkpoint(job_id: &str, request: &Value, checkpoint: R
     };
     if exited && ["running","waiting_for_audio"].contains(&result["state"].as_str().unwrap_or("")) {
         result["state"] = "failed".into();
+        result["worker_exit_interrupted"] = true.into();
         result["error"] = "Worker exited or the application restarted. Saved audio and completed results remain available; resume the job.".into();
     }
     project_worker_lifecycle(&mut result, exited);
     project_request_metadata(&mut result, &request);
     result
+}
+
+fn project_supervised_interruption(status: &mut Value, dir: &Path, exited: bool) {
+    if !exited || status["worker_exit_interrupted"] != true { return; }
+    let interruption = read(&dir.join("worker-interruption.json")).unwrap_or(Value::Null);
+    if interruption["reason"] == "timed_out" {
+        status["error"] = "The local speech model did not respond for five minutes and its worker was stopped. Saved audio and completed transcript chunks are preserved; retry the transcript or choose Apex fallback.".into();
+        status["worker_timed_out"] = true.into();
+    } else if dir.join("stop.request").is_file() {
+        status["state"] = "stopped".into();
+        status["error"] = "Transcription paused. Saved audio and completed chunks are preserved; resume when ready.".into();
+    }
+}
+
+/// A deletion owns a reservation through the caller's database transaction.
+/// Retain original audio/workspaces; do not let a late worker resurrect rows.
+pub(crate) struct MeetingDeletionLease {
+    sessions: Vec<String>,
+    _worker_guards: Vec<fs::File>,
+}
+impl Drop for MeetingDeletionLease {
+    fn drop(&mut self) {
+        self._worker_guards.clear();
+        if let Ok(mut deleting) = DELETING_SESSIONS.lock() {
+            for session in &self.sessions { deleting.remove(session); }
+        }
+    }
+}
+
+pub(crate) async fn prepare_meeting_deletion(pool: &sqlx::SqlitePool, meeting_id: &str) -> Result<MeetingDeletionLease, String> {
+    valid_id(meeting_id)?;
+    if crate::audio::recording_commands::capture_in_progress() { return Err("Finish recording before removing a conversation.".into()); }
+    let related: Vec<(String, Option<String>)> = if has_bindings_pool(pool).await? {
+        sqlx::query_as("WITH RECURSIVE related(id) AS (SELECT ? UNION SELECT b.meeting_id FROM local_transcription_bindings b JOIN related r ON b.source_meeting_id=r.id) SELECT m.id,m.folder_path FROM meetings m JOIN related r ON m.id=r.id")
+            .bind(meeting_id).fetch_all(pool).await.map_err(|e|e.to_string())?
+    } else {
+        sqlx::query_as("SELECT id,folder_path FROM meetings WHERE id=?").bind(meeting_id).fetch_all(pool).await.map_err(|e|e.to_string())?
+    };
+    let sessions: Vec<String> = related.iter().filter_map(|(_, path)| path.as_deref().map(path_key)).collect::<HashSet<_>>().into_iter().collect();
+    let lease = reserve_removal_sessions(sessions)?;
+    let ids: HashSet<String> = related.into_iter().map(|(id,_)|id).collect();
+    tokio::task::spawn_blocking(move || stop_meeting_workers(lease, ids)).await.map_err(|e|e.to_string())?
+}
+
+fn reserve_removal_sessions(sessions: Vec<String>) -> Result<MeetingDeletionLease,String> {
+    // Match the launch lock order: children then deletion reservations.
+    {
+        let _children = CHILDREN.lock().map_err(|e|e.to_string())?;
+        let mut deleting = DELETING_SESSIONS.lock().map_err(|e|e.to_string())?;
+        if sessions.iter().any(|session| deleting.contains(session)) { return Err("This conversation is already being removed.".into()); }
+        deleting.extend(sessions.iter().cloned());
+    }
+    Ok(MeetingDeletionLease { sessions, _worker_guards: Vec::new() })
+}
+
+/// Caller validates the exact recovery session and owns the capture-start lock.
+/// The returned lease must live until audio deletion/tombstone publication ends.
+pub(crate) async fn prepare_capture_removal(session: &Path) -> Result<MeetingDeletionLease,String> {
+    let lease=reserve_removal_sessions(vec![path_key(&session.to_string_lossy())])?;
+    tokio::task::spawn_blocking(move || stop_meeting_workers(lease, HashSet::new())).await.map_err(|e|e.to_string())?
+}
+
+async fn has_bindings_pool(pool: &sqlx::SqlitePool) -> Result<bool,String> {
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='local_transcription_bindings'").fetch_one(pool).await.map_err(|e|e.to_string())?;
+    Ok(count > 0)
+}
+
+fn stop_meeting_workers(lease: MeetingDeletionLease, ids: HashSet<String>) -> Result<MeetingDeletionLease,String> {
+    stop_meeting_workers_at(&data_root()?, lease, ids)
+}
+
+fn stop_meeting_workers_at(root: &Path, mut lease: MeetingDeletionLease, ids: HashSet<String>) -> Result<MeetingDeletionLease,String> {
+    let mut jobs = Vec::new();
+    {
+        let mut children = CHILDREN.lock().map_err(|e|e.to_string())?;
+        for ((kind,id),child) in children.iter_mut() {
+            if child.try_wait().map_err(|e|e.to_string())?.is_some() { continue; }
+            valid_id(id)?;
+            let dir=root.join(match kind { WorkerKind::Transcription=>"jobs",WorkerKind::Speaker=>"speaker-jobs" }).join(id);
+            // A corrupt request must not hide a live owned process from removal.
+            let request=read(&dir.join("request.json")).map_err(|e|format!("A running speech job could not be verified. Nothing was deleted. {e}"))?;
+            if request["session_dir"].as_str().map(|session|lease.sessions.contains(&path_key(session))).unwrap_or(false)
+                || request["meeting_id"].as_str().map(|id|ids.contains(id)).unwrap_or(false) {
+                fs::write(dir.join("stop.request"), b"conversation removal; preserve completed checkpoints").map_err(|e|e.to_string())?;
+                jobs.push(((*kind,id.clone()),child.generation));
+            }
+        }
+    }
+    let started = Instant::now();
+    loop {
+        let mut live = false;
+        {
+            let mut children = CHILDREN.lock().map_err(|e|e.to_string())?;
+            for (key,generation) in &jobs {
+                if let Some(child) = children.get_mut(key).filter(|child| child.generation == *generation) {
+                    if child.try_wait().map_err(|e|e.to_string())?.is_none() {
+                        live = true;
+                        if started.elapsed() >= WORKER_STOP_GRACE { child.kill().map_err(|e|format!("Could not stop this conversation's speech worker; it was not deleted. {e}"))?; }
+                    }
+                }
+            }
+        }
+        if !live { break; }
+        if started.elapsed() > WORKER_STOP_GRACE + Duration::from_secs(3) { return Err("This conversation's speech worker is still exiting. Nothing was deleted; try again.".into()); }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // A worker launched outside this app is never terminated. Its exclusive
+    // handle prevents deletion until it has safely released its checkpoint.
+    for collection in ["jobs","speaker-jobs"] {
+        let parent=root.join(collection); if !parent.exists() { continue; }
+        for entry in fs::read_dir(parent).map_err(|e|e.to_string())? {
+            let dir=entry.map_err(|e|e.to_string())?.path();
+            let request=match read(&dir.join("request.json")) {
+                Ok(request)=>request,
+                Err(_) => {
+                    // Unknown old requests may be skipped only while their
+                    // worker handle is exclusively idle through this deletion.
+                    lease._worker_guards.push(crate::storage_retention::worker_guard(&dir).map_err(|e|format!("An unreadable speech job is still active. Nothing was deleted. {e}"))?);
+                    continue;
+                }
+            };
+            if request["session_dir"].as_str().map(|session|lease.sessions.contains(&path_key(session))).unwrap_or(false)
+                || request["meeting_id"].as_str().map(|id|ids.contains(id)).unwrap_or(false) {
+                lease._worker_guards.push(crate::storage_retention::worker_guard(&dir).map_err(|e|format!("A speech worker still owns this conversation. Nothing was deleted. {e}"))?);
+            }
+        }
+    }
+    Ok(lease)
 }
 
 fn project_request_metadata(status: &mut Value, request: &Value) {
@@ -1001,6 +1225,92 @@ pub fn open_claude_desktop(mode: String, transcript: String, title: String) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cpu_trelis_waits_for_verified_saved_capture_while_gpu_can_start_live() {
+        let root=tempfile::tempdir().unwrap();
+        fs::write(root.path().join("timeline.jsonl"),b"{\"kind\":\"capture_stopped\",\"at_seconds\":0}\n").unwrap();
+        let cpu=json!({"models":{"trelis":{"backend":"transformers","device":"cpu"}}});
+        let gpu=json!({"models":{"trelis":{"backend":"openvino","device":"GPU"}}});
+        assert!(validate_trelis_timing(&gpu,root.path()).is_ok());
+        assert!(validate_trelis_timing(&cpu,root.path()).is_err());
+        fs::write(root.path().join("timeline.jsonl"),b"{\"kind\":\"capture_finalized\"}\n").unwrap();
+        assert!(validate_trelis_timing(&cpu,root.path()).is_ok());
+    }
+
+    #[test]
+    fn supervisor_distinguishes_waiting_audio_from_a_stalled_model_and_bounded_stop() {
+        assert_eq!(supervisor_action(None, Duration::from_secs(299), Some("running")), None);
+        assert_eq!(supervisor_action(None, WORKER_STALL_LIMIT, Some("running")), Some("timed_out"));
+        assert_eq!(supervisor_action(None, WORKER_STALL_LIMIT, Some("waiting_for_audio")), None);
+        assert_eq!(supervisor_action(Some(Duration::from_secs(7)), Duration::from_secs(1), Some("running")), None);
+        assert_eq!(supervisor_action(Some(WORKER_STOP_GRACE), Duration::from_secs(1), Some("waiting_for_audio")), Some("stopped"));
+        let reads = std::cell::Cell::new(0);
+        for tick in 0..32 {
+            assert_eq!(supervisor_decision(Some(Duration::from_millis(tick * 250)), Duration::from_secs(1), || { reads.set(reads.get()+1); Some("running".into()) }), None);
+        }
+        assert_eq!(supervisor_decision(Some(WORKER_STOP_GRACE), WORKER_STALL_LIMIT, || { reads.set(reads.get()+1); Some("running".into()) }), Some("stopped"));
+        assert_eq!(reads.get(), 0, "Stop and its grace period must not read the full checkpoint");
+        assert_eq!(supervisor_decision(None, WORKER_STALL_LIMIT, || { reads.set(reads.get()+1); Some("waiting_for_audio".into()) }), None);
+        assert_eq!(supervisor_decision(None, WORKER_STALL_LIMIT, || { reads.set(reads.get()+1); Some("running".into()) }), Some("timed_out"));
+        assert_eq!(reads.get(), 2);
+    }
+
+    #[test]
+    fn interrupted_worker_projection_preserves_checkpoint_and_successful_results() {
+        let root=tempfile::tempdir().unwrap();
+        fs::write(root.path().join("stop.request"), b"stop").unwrap();
+        let checkpoint=json!({"state":"running","segments":[{"id":"saved","text":"saved words"}]});
+        fs::write(root.path().join("status.json"),serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+        let before=fs::read(root.path().join("status.json")).unwrap();
+        let mut status=project_transcription_checkpoint("job",&json!({}),Ok(Some(checkpoint)),true);
+        project_supervised_interruption(&mut status,root.path(),true);
+        assert_eq!(status["state"],"stopped"); assert_eq!(status["segments"][0]["text"],"saved words");
+        fs::write(root.path().join("worker-interruption.json"),br#"{"reason":"timed_out"}"#).unwrap();
+        status["state"]="failed".into(); project_supervised_interruption(&mut status,root.path(),true);
+        assert_eq!(status["worker_timed_out"],true);
+        assert_eq!(fs::read(root.path().join("status.json")).unwrap(),before);
+        let mut complete=json!({"state":"complete","segments":[]});
+        project_supervised_interruption(&mut complete,root.path(),true);
+        assert_eq!(complete["state"],"complete");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn deletion_lease_stops_only_matching_owned_worker_and_preserves_checkpoint_and_audio() {
+        use std::os::windows::process::CommandExt;
+        let fixture=tempfile::tempdir().unwrap(); let root=fixture.path();
+        let source=root.join("recordings/source"); fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("original.wav"),b"original audio remains").unwrap();
+        let id=uuid::Uuid::new_v4().to_string(); let other=uuid::Uuid::new_v4().to_string();
+        for (job,session) in [(&id,source.to_string_lossy().to_string()),(&other,"different-source".to_owned())] {
+            let dir=root.join("jobs").join(job); fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("request.json"),serde_json::to_vec(&json!({"session_dir":session})).unwrap()).unwrap();
+            fs::write(dir.join("status.json"),b"{\"state\":\"running\",\"segments\":[{\"text\":\"saved words\"}]}").unwrap();
+        }
+        let key=(WorkerKind::Transcription,id.clone()); let other_key=(WorkerKind::Transcription,other.clone());
+        let sleeper=|| { let mut command=Command::new("powershell.exe"); command.args(["-NoProfile","-NonInteractive","-Command","Start-Sleep -Seconds 30"]).creation_flags(0x08000000); WorkerProcess::spawn(&mut command).unwrap() };
+        {
+            let mut children=CHILDREN.lock().unwrap(); children.insert(key.clone(),sleeper()); children.insert(other_key.clone(),sleeper());
+        }
+        let checkpoint=root.join("jobs").join(&id).join("status.json"); let before=fs::read(&checkpoint).unwrap();
+        let session=path_key(&source.to_string_lossy());
+        let lease=reserve_removal_sessions(vec![session.clone()]).unwrap();
+        assert!(reserve_removal_sessions(vec![session.clone()]).is_err());
+        let lease=stop_meeting_workers_at(root,lease,HashSet::new()).unwrap();
+        {
+            let mut children=CHILDREN.lock().unwrap();
+            assert!(children.get_mut(&key).unwrap().try_wait().unwrap().is_some());
+            assert!(children.get_mut(&other_key).unwrap().try_wait().unwrap().is_none());
+            children.get_mut(&other_key).unwrap().kill().unwrap();
+        }
+        assert!(crate::storage_retention::worker_guard(&root.join("jobs").join(&id)).is_err());
+        assert_eq!(fs::read(&checkpoint).unwrap(),before);
+        assert_eq!(fs::read(source.join("original.wav")).unwrap(),b"original audio remains");
+        drop(lease);
+        assert!(crate::storage_retention::worker_guard(&root.join("jobs").join(&id)).is_ok());
+        assert!(!DELETING_SESSIONS.lock().unwrap().contains(&session));
+        let mut children=CHILDREN.lock().unwrap(); children.remove(&key); children.remove(&other_key);
+    }
 
     async fn import_pool() -> sqlx::SqlitePool {
         let pool=sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();

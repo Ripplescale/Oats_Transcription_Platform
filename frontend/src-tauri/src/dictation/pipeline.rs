@@ -9,6 +9,8 @@ type ResultText = Result<Option<String>, String>;
 pub(super) struct Transcript {
     pub text: String,
     pub draft_text: Option<String>,
+    pub streaming_message: Option<String>,
+    pub delivery_error: Option<String>,
 }
 struct Job { wav: Vec<u8>, final_request: bool }
 #[derive(Default)]
@@ -27,12 +29,12 @@ impl Pipeline {
         Self::start_with_updates(cancelled, transcribe, |_, _| {})
     }
 
-    /// One observer sees confirmed cumulative phrase text in request order.
+    /// One observer sees confirmed cumulative text in request order.
     /// The worker owner validates confirmation before this delivery callback.
     pub(super) fn start_with_updates(cancelled: Arc<AtomicBool>, mut transcribe: impl FnMut(&[u8], bool) -> ResultText + Send + 'static,
         mut update: impl FnMut(&str, bool) + Send + 'static) -> Result<Self, String> {
         Self::start_stream(cancelled, move |wav, final_request| {
-            transcribe(wav, final_request).map(|value| value.map(|text| Transcript { text, draft_text: None }))
+            transcribe(wav, final_request).map(|value| value.map(|text| Transcript { text, draft_text: None, streaming_message: None, delivery_error: None }))
         }, move |value, final_request| update(&value.text, final_request))
     }
 
@@ -134,7 +136,8 @@ impl Drop for Pipeline {
     }
 }
 
-/// Trelis checks every two seconds; streaming checks every second. Both keep a
+/// Live dictation checks every second; the legacy capture helper checks every
+/// two seconds. Both keep a
 /// 100 ms filter-edge guard for normalized audio reused between requests.
 /// Slow inference keeps only the latest prefix. This is a submission cadence,
 /// not a promise that recognition or stable-word delivery finishes that fast.
@@ -160,7 +163,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let pipeline = Pipeline::start_stream(Arc::new(AtomicBool::new(false)), |wav, final_request| {
             Ok(Some(Transcript { text: if final_request { "We are ready." } else { "We" }.into(),
-                draft_text: if final_request { None } else { Some(if wav[0] == 1 { "were" } else { "are ready" }.into()) } }))
+                draft_text: if final_request { None } else { Some(if wav[0] == 1 { "were" } else { "are ready" }.into()) }, streaming_message: None, delivery_error: None }))
         }, move |value, final_request| { tx.send((value.clone(), final_request)).unwrap(); }).unwrap();
         pipeline.preview(|| Ok(vec![1])).unwrap();
         let first = rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -182,7 +185,7 @@ mod tests {
         let stop = cancelled.clone();
         let pipeline = Pipeline::start_stream(cancelled, move |_, _| {
             stop.store(true, Ordering::Release);
-            Ok(Some(Transcript { text: "stable".into(), draft_text: Some("draft".into()) }))
+            Ok(Some(Transcript { text: "stable".into(), draft_text: Some("draft".into()), streaming_message: None, delivery_error: None }))
         }, |_, _| panic!("cancelled decode must not publish")).unwrap();
         assert!(pipeline.finish(vec![1], Duration::from_secs(2)).unwrap().is_none());
     }

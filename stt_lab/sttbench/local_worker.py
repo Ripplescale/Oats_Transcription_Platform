@@ -422,6 +422,10 @@ def recover_pending_segment(status, status_path, job, spec, config, session, row
             if verified['audio_sha256'] != saved['audio_provenance']['audio_sha256']:
                 raise ValueError('Recovery audio changed since its checkpoint')
             return saved
+        # Publish before entering the model: a blocked context retry must not
+        # masquerade as harmless waiting for future capture in the supervisor.
+        status.update(state='running', phase='recovering_context')
+        write_json(status_path, status)
         result, audio = _recognize_window(spec, config, session, rows, begin, finish, path,
                                           infer, speech_gate, gate,
                                           allow_gate_skip=kind != 'overlap_fringe')

@@ -1,7 +1,7 @@
 # Complete Windows setup (maintainers)
 
 Recipients download **Oats-Setup.exe** from the complete-setup GitHub release.
-They choose **Download and install**, or **Save for offline setup**. The latter
+They choose **Install oats**, or **Download for another PC**. The latter
 keeps the executable and every numbered part in the chosen folder; copy that
 whole folder to an offline PC and run the same executable there.
 
@@ -19,13 +19,16 @@ This permits a corrected small setup release without reuploading the models.
 ## Build
 
 Use Windows x64 with Python 3.12.14 and .NET Framework 4.8. The compiler is the
-Windows Framework64 C# compiler; no compiler is needed on recipient PCs. Keep all
+Windows Framework64 C# compiler. Maintainers also need Node for the existing
+updater signature verifier; recipients need neither Node nor a compiler. Keep all
 generated files under ignored `target/bootstrap`. Building never activates a
 runtime or installs oats.
 
-1. Download the pinned app 0.8.8 assets (`oats_0.8.8_x64-setup.exe`, its `.sig`,
-   and `latest.json`) from GitHub. Verify with `scripts/windows-update-feed.cjs`
-   using the release public key. `build_bundle.py` additionally pins its hash.
+1. Obtain the **current signed app installer**, its matching `latest.json`, and
+   the trusted existing oats updater public key. The installer version must
+   match package.json, Cargo.toml and tauri.conf.json. Both fresh and reused
+   payload builds refuse to compile without these inputs. The frozen 0.8.8 app
+   in older payloads remains archival content and is never launched by new setup.
 2. Run `prepare-inputs.ps1 -Output <absolute input directory>` to fetch public
    licenses and redistributables and verify Microsoft signatures.
 3. Run `python -B -m unittest discover -s scripts/bootstrap -p test_bundle.py`.
@@ -35,7 +38,11 @@ runtime or installs oats.
    no arguments for the C# transport/path fixture checks.
 4. Run `build_bundle.py --runtime <existing verified runtime.json>
    --python-base <private Python 3.12.14 directory> --inputs <input directory>
-   --output <output directory>`. These are maintainer inputs, never recipient
+   --output <output directory> --app-installer <oats_CURRENT_x64-setup.exe>
+   --update-feed <matching latest.json> --public-key <trusted updater.pub>
+   --node <maintainer node.exe>`. The same signed-app arguments are mandatory
+   when adding `--reuse-bundle <old bundle.json>` or using `repack_bundle.py`.
+   These are maintainer inputs, never recipient
    instructions. The tool explicitly selects components, not the app data tree.
 5. Run `CoreChecks.exe extract <bundle.json> <disposable root>/packages/<id>`.
    Run that package's `python/python.exe -I -B setup/configure.py --root
@@ -49,6 +56,21 @@ runtime or installs oats.
 7. Upload to a draft GitHub release, verify every asset digest/size, then publish
    with `--latest=false`. Confirm the ordinary app feed still resolves to its
    existing signed app release. Do not install locally as part of publishing.
+   Do not upload the `.build` directory; it holds a local embedding input.
+
+The current installer is verified by `windows-update-feed.cjs` immediately before
+embedding. The bundle binds its authenticated version, SHA256 and byte count;
+`payload_app_version` retains the older archive's version explicitly. Setup
+checks the embedded bytes and publishes a separate version/hash-named executable
+atomically. It preserves and never executes `setup/oats.exe` from old model parts.
+This permits current app fixes without reuploading model weights. No current
+signed installer means no production setup build; never relabel an older app.
+
+For explicit code/UI fixture compilation only, maintainers may call
+`compile_setup(..., allow_fixture=True)`. Such an artifact lacks the required app
+resource and refuses actual setup at startup. There is no production CLI bypass.
+Set `OATS_BOOTSTRAP_TEST_NODE` when Node is not on PATH to run the real ephemeral
+signature/version/tampering integration tests. Test keys never leave fixtures.
 
 Model original and converted hashes are checked while building, extracting, and
 preparing. ZIP64 is streamed into parts of at most 1500 MiB and read directly

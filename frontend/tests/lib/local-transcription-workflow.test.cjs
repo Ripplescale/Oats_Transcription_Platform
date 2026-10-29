@@ -42,10 +42,28 @@ test('same-count context recovery revision reimports the selected text and survi
 function fixture(previous) {
   const calls = [], imports = [], stops = [], jobs = new Map(), speakers = new Map(), meetings = new Map(), bindings = new Map();
   const importFailures = new Set(), startFailures = new Set();
-  let nextJob = 0, nextSpeaker = 0, stopFailures = 0, speakersEnabled = false, startGate, speakerStartGate;
+  let nextJob = 0, nextSpeaker = 0, stopFailures = 0, speakersEnabled = false, startGate, speakerStartGate, deletionGate, deletionError, profileGate, runtimeTiming='during-recording';
   const dependencies = {
     invoke: async (command, args = {}) => {
       calls.push({ command, args: clone(args) });
+      if (command === 'get_local_stt_profiles') {
+        if (profileGate) await profileGate;
+        return ['trelis-5','trelis-10','trelis-20'].map(id=>({id,recommended_timing:runtimeTiming}));
+      }
+      if (command === 'api_delete_meeting') {
+        if (deletionGate) await deletionGate;
+        if (deletionError) throw new Error(deletionError);
+        // Native deletion stops only workers belonging to this source meeting.
+        for (const run of result.workflow.state.runs.filter(run => run.meetingId === args.meetingId || run.transcriptMeetingId === args.meetingId)) {
+          if (run.job) jobs.get(run.job.job_id).state = 'stopped';
+        }
+        return { status: 'success' };
+      }
+      if (command === 'delete_recoverable_capture') {
+        if (deletionGate) await deletionGate;
+        if (deletionError) throw new Error(deletionError);
+        return { status: 'deleted' };
+      }
       if (command === 'ensure_capture_meeting') {
         const key = pathKey(args.sessionDir);
         if (!meetings.has(key)) meetings.set(key, `meeting-${meetings.size + 1}`);
@@ -116,6 +134,9 @@ function fixture(previous) {
     enableSpeakers: () => { speakersEnabled = true; result.workflow.state.speakerSetup = undefined; },
     gateStarts: promise => { startGate = promise; },
     gateSpeakerStarts: promise => { speakerStartGate = promise; },
+    gateDeletion: promise => { deletionGate = promise; },
+    failDeletion: error => { deletionError = error; },
+    gateProfiles: (promise,timing='after-recording') => {profileGate=promise;runtimeTiming=timing;},
     reload: () => {
       const saved = clone(result.workflow.state);
       for (const run of saved.runs) if (run.job) delete run.job.segments;
@@ -145,6 +166,101 @@ test('an exited job with an unreadable checkpoint does not block the next saved 
   assert.equal(f.count('start_local_transcription'), 2);
   assert.equal(f.count('import_local_transcription'), importsBefore,
     'an unreadable checkpoint cannot replace an existing transcript');
+});
+
+test('deleting a postcall conversation waits for native stop and removes its queue before the next start', async () => {
+  const f=fixture(); await f.workflow.captureStarted(capture); await f.workflow.captureStopped(capture);
+  await f.workflow.captureStarted(second); await f.workflow.captureStopped(second);
+  const old=f.live(); assert.ok(old.job); assert.equal(f.live(second).job,undefined);
+  let release; f.gateDeletion(new Promise(resolve=>{release=resolve;}));
+  const deleting=f.workflow.deleteMeeting(old.meetingId);
+  for(let i=0;i<8;i++) await Promise.resolve();
+  const imports=f.count('import_local_transcription');
+  await f.workflow.tick();
+  assert.equal(f.count('import_local_transcription'),imports,'polls cannot race the deletion transaction');
+  assert.ok(f.live(),'run stays recoverable until deletion succeeds');
+  release(); await deleting;
+  assert.equal(f.live(),undefined);
+  await f.workflow.tick();
+  assert.equal(f.live(second).job.state,'running');
+});
+
+test('failed conversation deletion retains paused recoverable runs and recording cannot be deleted', async () => {
+  const f=fixture(); await f.workflow.captureStarted(capture);
+  await assert.rejects(f.workflow.deleteMeeting(f.live().meetingId),/Finish recording/);
+  assert.equal(f.count('api_delete_meeting'),0);
+  await f.workflow.captureStopped(capture); f.failDeletion('worker still exiting');
+  await assert.rejects(f.workflow.deleteMeeting(f.live().meetingId),/worker still exiting/);
+  assert.ok(f.live().job); assert.equal(f.live().pausedByUser,true);
+  assert.equal(f.live().resumeRequested,false);
+});
+
+test('capture interruption pauses its worker and requires audio recovery without announcing saved completion', async () => {
+  const f=fixture(); await f.workflow.captureStarted(capture); const live=f.live();
+  const stopped=f.stops.length;
+  await f.workflow.captureInterrupted(capture,'Device disconnected');
+  assert.equal(live.recording,false); assert.equal(live.needsRecovery,true);
+  assert.match(live.error,/Recover its saved audio/);
+  assert.equal(f.workflow.state.currentSession,undefined);
+  assert.equal(f.count('stop_local_transcription'),1);
+  assert.equal(f.stops.length,stopped,'failure is not a saved recording event');
+  f.status(live,{state:'stopped'}); await f.workflow.tick();
+  assert.equal(f.count('start_local_transcription'),1,'recovery must precede any new transcript pass');
+});
+
+test('recovery audio deletion removes only its workflow pointers after native success', async () => {
+  const f=fixture(); await f.workflow.captureStarted(capture); await f.workflow.captureInterrupted(capture,'test capture failure');
+  await f.workflow.captureStarted(second); await f.workflow.captureStopped(second);
+  let release; f.gateDeletion(new Promise(resolve=>{release=resolve;}));
+  const deleting=f.workflow.deleteRecoveredAudio(capture);
+  for(let i=0;i<10;i++) await Promise.resolve();
+  assert.ok(f.live(),'workflow pointer remains until native audio deletion completes');
+  const imports=f.count('import_local_transcription'); await f.workflow.tick();
+  assert.equal(f.count('import_local_transcription'),imports);
+  release(); await deleting;
+  assert.equal(f.live(),undefined); assert.ok(f.live(second));
+  assert.equal(f.count('api_delete_meeting'),0,'audio removal never deletes notes/transcript database rows');
+  assert.equal(f.count('delete_recoverable_capture'),1);
+});
+
+test('failed recovery audio deletion retains the capture and still permits later polling', async () => {
+  const f=fixture(); await f.workflow.captureStarted(capture);
+  await assert.rejects(f.workflow.deleteRecoveredAudio(capture),/Finish recording/);
+  assert.equal(f.count('delete_recoverable_capture'),0);
+  await f.workflow.captureInterrupted(capture,'device lost'); f.failDeletion('audio busy');
+  await assert.rejects(f.workflow.deleteRecoveredAudio(capture),/audio busy/);
+  assert.equal(f.live().needsRecovery,true); assert.equal(f.live().pausedByUser,true);
+  await f.workflow.tick();
+});
+
+test('CPU runtime records first and starts its same Trelis transcript only after capture finishes', async () => {
+  const f=fixture(); f.workflow.configureProfiles([{id:'trelis-10',recommended_timing:'after-recording'}]);
+  await f.workflow.captureStarted(capture);
+  assert.equal(f.live().preferences.timing,'after-recording');
+  assert.equal(f.live().job,undefined); assert.equal(f.count('start_local_transcription'),0);
+  await f.workflow.captureStopped(capture);
+  assert.equal(f.live().job.state,'running'); assert.equal(f.live().role,'live-final');
+  assert.equal(f.count('start_local_transcription'),1); assert.equal(f.workflow.state.runs.length,1);
+});
+
+test('an early capture start waits for runtime timing inspection before creating or launching a run', async () => {
+  const f=fixture(); let release; f.gateProfiles(new Promise(resolve=>{release=resolve;}));
+  const started=f.workflow.captureStarted(capture);
+  for(let i=0;i<10;i++) await Promise.resolve();
+  assert.equal(f.workflow.state.runs.length,0); assert.equal(f.count('start_local_transcription'),0);
+  release(); await started;
+  assert.equal(f.live().preferences.timing,'after-recording'); assert.equal(f.live().job,undefined);
+  await f.workflow.captureStopped(capture);
+  assert.equal(f.live().job.state,'running'); assert.equal(f.count('get_local_stt_profiles'),1);
+});
+
+test('runtime timing changes affect future captures without rewriting active job preferences', async () => {
+  const f=fixture(); await f.workflow.captureStarted(capture); const old=f.live();
+  f.workflow.configureProfiles([{id:'trelis-10',recommended_timing:'after-recording'}]);
+  assert.equal(old.preferences.timing,'during-recording');
+  await f.workflow.captureStopped(capture); f.status(old,{state:'complete'}); await f.workflow.tick();
+  await f.workflow.captureStarted(second);
+  assert.equal(f.live(second).preferences.timing,'after-recording'); assert.equal(f.live(second).job,undefined);
 });
 
 async function finishDraft(f, values = {}) {

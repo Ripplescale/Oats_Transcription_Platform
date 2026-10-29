@@ -16,6 +16,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 
+/// Classic PCM WAV and the journal verifier share this enforced session limit.
+/// Capture stops automatically; callers may start a fresh recording afterward.
+pub const MAX_CAPTURE_SECONDS: f64 = 8.0 * 3600.0;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureInfo {
     pub session_id: String,
@@ -129,6 +133,7 @@ struct Track {
     start: f64,
     next: f64,
     buffer: Vec<f32>,
+    limit_marked: bool,
 }
 
 fn journal_line(journal: &mut File, value: &Value) -> Result<()> {
@@ -140,7 +145,13 @@ fn journal_line(journal: &mut File, value: &Value) -> Result<()> {
 
 fn commit(directory: &Path, journal: &mut File, name: &str, track: &mut Track, count: usize) -> Result<()> {
     if count == 0 { return Ok(()); }
+    let requested = count;
+    // The sample and callback clocks can differ by fractional samples. Bind the
+    // persisted chunk itself to the limit as well as checking callback intake.
+    let count = count.min(((MAX_CAPTURE_SECONDS - track.start).max(0.0) * track.rate as f64).floor() as usize);
+    if count == 0 { track.buffer.clear(); return Ok(()); }
     let samples: Vec<f32> = track.buffer.drain(..count).collect();
+    if count < requested { track.buffer.clear(); }
     let relative = format!("tracks/{name}/{:08}.wav", track.sequence);
     let bytes = wav_bytes(track.rate, &samples);
     let hash = format!("{:x}", Sha256::digest(&bytes));
@@ -170,10 +181,11 @@ fn write_loop(directory: PathBuf, mut journal: File, receiver: mpsc::Receiver<Me
     for message in receiver {
         match message {
             Message::Event(event) => journal_line(&mut journal, &event)?,
-            Message::Audio {track: name, rate, start, samples} => {
+            Message::Audio {track: name, rate, start, mut samples} => {
                 if !["microphone", "system"].contains(&name.as_str()) || !start.is_finite() || !(8000..=384000).contains(&rate) {
                     bail!("Invalid source audio metadata");
                 }
+                let start = start.min(MAX_CAPTURE_SECONDS);
                 let track = tracks.entry(name.clone()).or_default();
                 // Sample counting absorbs ordinary callback jitter. A >100ms
                 // discontinuity starts a new run and records the missing range.
@@ -192,6 +204,16 @@ fn write_loop(directory: PathBuf, mut journal: File, receiver: mpsc::Receiver<Me
                     track.rate = rate;
                     track.start = start.max(track.next);
                     track.next = track.start;
+                }
+                // Sample clocks can drift ahead of the wall clock. Never write
+                // chunks that our own recovery format cannot subsequently read.
+                let permitted = ((MAX_CAPTURE_SECONDS - track.next).max(0.0) * rate as f64).floor() as usize;
+                if samples.len() > permitted {
+                    samples.truncate(permitted);
+                    if !track.limit_marked {
+                        journal_line(&mut journal, &json!({"kind":"recording_limit_reached","track":name,"at_seconds":MAX_CAPTURE_SECONDS}))?;
+                        track.limit_marked = true;
+                    }
                 }
                 track.next += samples.len() as f64 / rate as f64;
                 track.buffer.extend(samples);
@@ -226,6 +248,9 @@ fn wav_bytes(rate: u32, samples: &[f32]) -> Vec<u8> {
 /// files are deleted, even after success. Incomplete trailing journal data is
 /// ignored; a malformed complete record or missing/hash-mismatched WAV fails.
 pub fn recover_capture(directory: &Path) -> Result<Value> {
+    if directory.join("source-audio-deleted.json").exists() {
+        bail!("Source audio was explicitly removed or its removal is pending. Saved text is retained; audio recovery is unavailable.");
+    }
     // Archived originals are restored byte-for-byte before the existing
     // verifier/recovery path runs; playback derivatives are never substitutes.
     super::source_archive::restore(directory)?;
@@ -241,7 +266,7 @@ pub fn recover_capture(directory: &Path) -> Result<Value> {
         if record["kind"] == "capture_finalized" { dropped_samples = record["dropped_samples"].as_u64().unwrap_or(0); }
         if record["kind"] == "capture_stopped" {
             let stopped = record["at_seconds"].as_f64().context("Invalid stop time")?;
-            if !stopped.is_finite() || !(0.0..=8.0 * 3600.0).contains(&stopped) { bail!("Invalid stop time"); }
+            if !stopped.is_finite() || !(0.0..=MAX_CAPTURE_SECONDS).contains(&stopped) { bail!("Invalid stop time"); }
             duration = duration.max(stopped);
         }
         if record["kind"] != "audio_chunk" { continue; }
@@ -259,7 +284,7 @@ pub fn recover_capture(directory: &Path) -> Result<Value> {
         if count == 0 || count > rate { bail!("Invalid committed chunk size"); }
         let start = record["start_seconds"].as_f64().context("Missing timestamp")?;
         let end = record["end_seconds"].as_f64().context("Missing timestamp")?;
-        if !(8000..=384000).contains(&rate) || !start.is_finite() || !end.is_finite() || start < 0.0 || end < start || end > 8.0 * 3600.0 { bail!("Invalid capture timeline"); }
+        if !(8000..=384000).contains(&rate) || !start.is_finite() || !end.is_finite() || start < 0.0 || end < start || end > MAX_CAPTURE_SECONDS { bail!("Invalid capture timeline"); }
         if (end - start - count as f64 / rate as f64).abs() > 0.0001 { bail!("Chunk duration does not match sample count"); }
         if audio.len() != 44 + count as usize * 2 || audio[..44] != wav_bytes(rate as u32, &vec![0.0; count as usize])[..44] {
             bail!("Invalid WAV header or length: {expected}");
@@ -340,6 +365,25 @@ pub fn recover_capture(directory: &Path) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_writer_enforces_recoverable_limit_without_allocating_long_playback() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("tracks/system")).unwrap();
+        let journal = File::create(root.path().join("timeline.jsonl")).unwrap();
+        let (sender, receiver) = mpsc::sync_channel(4);
+        sender.send(Message::Audio { track:"system".into(), rate:16000, start:MAX_CAPTURE_SECONDS - 0.25, samples:vec![0.25;16000] }).unwrap();
+        sender.send(Message::Audio { track:"system".into(), rate:16000, start:MAX_CAPTURE_SECONDS + 1.0, samples:vec![0.25;16000] }).unwrap();
+        drop(sender);
+        write_loop(root.path().into(), journal, receiver, Arc::new(AtomicU64::new(0))).unwrap();
+        let rows:Vec<Value> = fs::read_to_string(root.path().join("timeline.jsonl")).unwrap().lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+        let chunks:Vec<_> = rows.iter().filter(|row|row["kind"] == "audio_chunk").collect();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0]["sample_count"], 4000);
+        assert_eq!(chunks[0]["end_seconds"], MAX_CAPTURE_SECONDS);
+        assert!(rows.iter().any(|row|row["kind"] == "recording_limit_reached"));
+        assert_eq!(fs::read(root.path().join("tracks/system/00000000.wav")).unwrap().len(), 44 + 8000);
+    }
 
     #[test]
     fn drains_pending_audio_and_preserves_independent_tracks_and_gaps() {

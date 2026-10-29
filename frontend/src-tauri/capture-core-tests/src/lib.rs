@@ -1,5 +1,11 @@
 #[path = "../../src/audio/durable_capture.rs"]
 pub mod durable_capture;
+#[cfg(test)]
+#[path = "../../src/audio/recording_shutdown.rs"]
+mod recording_shutdown;
+#[cfg(test)]
+#[path = "../../src/audio/capture_removal.rs"]
+mod capture_removal;
 #[path = "../../src/audio/source_archive.rs"]
 pub mod source_archive;
 #[path = "../../src/storage_retention.rs"]
@@ -24,6 +30,9 @@ mod dictation_live_delivery;
 #[cfg(test)]
 #[path = "../../src/local_worker_policy.rs"]
 mod local_worker_policy;
+#[cfg(test)]
+#[path = "../../src/local_worker_process.rs"]
+mod local_worker_process;
 #[cfg(all(test, windows))]
 #[path = "../../src/dictation/windows.rs"]
 mod dictation_windows;
@@ -122,8 +131,20 @@ mod worker_process_policy {
 #[cfg(test)]
 mod transcription_checkpoints {
     use serde_json::{json, Value};
-    use std::{fs, path::Path};
+    use std::{fs, path::Path, time::Duration};
     include!(concat!(env!("OUT_DIR"), "/transcription_checkpoints.rs"));
+}
+
+#[cfg(all(test, windows))]
+mod worker_deletion {
+    use serde_json::{json,Value};
+    use std::{collections::{HashMap,HashSet},fs,path::{Path,PathBuf},process::Command,sync::Mutex,time::{Duration,Instant}};
+    use once_cell::sync::Lazy;
+    use crate::{local_worker_policy::WorkerKind,local_worker_process::WorkerProcess,workspace_components::valid_id};
+    type WorkerChildren=HashMap<(WorkerKind,String),WorkerProcess>;
+    static CHILDREN:Lazy<Mutex<WorkerChildren>>=Lazy::new(||Mutex::new(HashMap::new()));
+    static DELETING_SESSIONS:Lazy<Mutex<HashSet<String>>>=Lazy::new(||Mutex::new(HashSet::new()));
+    include!(concat!(env!("OUT_DIR"),"/worker_deletion.rs"));
 }
 
 #[cfg(test)]

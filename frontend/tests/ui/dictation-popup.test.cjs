@@ -61,6 +61,14 @@ async function main() {
     await page.screenshot({ path: path.join(output, 'idle.png') }); report.screenshots.push('idle.png');
     report.checks.push('No capture or clipboard mutation on mount or polling');
 
+    await page.evaluate(() => window.qaSetDictation({ phase: 'listening', session_id: 'degraded-trelis', live_typing: true,
+      streaming_message: 'Pause detection is unavailable. Streaming continues with word agreement.' }));
+    await page.getByRole('heading', { name: 'Listening · check Settings', exact: true }).waitFor();
+    assert.match(await page.locator('#title').getAttribute('title'), /Pause detection is unavailable/);
+    assert.equal(await page.getByRole('button', { name: 'Copy text', exact: true }).isVisible(), false);
+    await page.evaluate(() => window.qaSetDictation({ streaming_message: null, live_typing: false }));
+    report.checks.push('Degraded pause detection is visible without interrupting live typing or offering Copy prematurely');
+
     await page.evaluate(() => window.qaSetDictation({ phase: 'listening', session_id: 'fictional-one', elapsed_seconds: 65.9, level: 0 }));
     await page.getByRole('heading', { name: 'Listening', exact: true }).waitFor();
     assert.equal(await page.locator('#level').isVisible(), true);
@@ -82,8 +90,19 @@ async function main() {
     await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
     await page.mouse.down({ button: 'right' }); await page.mouse.up({ button: 'right' });
     assert.equal(await page.evaluate(() => window.qaCalls.filter(call => call.command === 'dictation_popup_drag').length), 0);
+    await page.evaluate(() => document.querySelector('#grip').addEventListener('pointerdown', event => {
+      window.qaPointer = { pointerId: event.pointerId, screenX: event.screenX, screenY: event.screenY };
+    }, { once: true }));
     await page.mouse.down();
-    await page.mouse.move(grip.x + 120, grip.y + 24, { steps: 20 });
+    await page.mouse.move(grip.x + 60, grip.y + 24, { steps: 2 });
+    // Dispatch one actual burst: awaited Playwright mouse steps can each take
+    // longer than the coalescing interval on a busy Windows build machine.
+    await page.evaluate(() => {
+      const grip = document.querySelector('#grip'), start = window.qaPointer;
+      for (let index = 1; index <= 20; index++) grip.dispatchEvent(new PointerEvent('pointermove', {
+        bubbles: true, pointerId: start.pointerId, screenX: start.screenX + index * 6, screenY: start.screenY + 24,
+      }));
+    });
     await page.mouse.up();
     await page.waitForFunction(() => window.qaCalls.some(call => call.command === 'dictation_popup_drag' && call.args.phase === 'end'));
     const gesture = await page.evaluate(() => window.qaCalls.filter(call => call.command === 'dictation_popup_drag'));

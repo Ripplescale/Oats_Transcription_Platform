@@ -1,0 +1,22 @@
+// Ephemeral test signatures only. The bytes below are never executable/installable.
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const [directory, version] = process.argv.slice(2);
+const { createFeed } = require('../windows-update-feed.cjs');
+const pair = crypto.generateKeyPairSync('ed25519');
+const keyId = crypto.randomBytes(8);
+const encode = value => Buffer.from(value).toString('base64');
+const rawKey = pair.publicKey.export({type:'spki',format:'der'}).subarray(-32);
+const key = encode(`untrusted comment: ephemeral test key\n${Buffer.concat([Buffer.from('Ed'),keyId,rawKey]).toString('base64')}\n`);
+const bytes = Buffer.from('MZ synthetic fixture only; never execute');
+const filename = path.join(directory, `oats_${version}_x64-setup.exe`);
+const signature = crypto.sign(null,crypto.createHash('blake2b512').update(bytes).digest(),pair.privateKey);
+const trusted = `timestamp:1\tfile:oats_${version}_x64-setup.exe\tversion:${version}`;
+const global = crypto.sign(null,Buffer.concat([signature,Buffer.from(trusted)]),pair.privateKey);
+const signed = encode(`untrusted comment: ephemeral test signature\n${Buffer.concat([Buffer.from('ED'),keyId,signature]).toString('base64')}\ntrusted comment: ${trusted}\n${global.toString('base64')}\n`);
+fs.writeFileSync(filename,bytes);
+fs.writeFileSync(filename+'.sig',signed);
+fs.writeFileSync(path.join(directory,'ephemeral.pub'),key);
+fs.writeFileSync(path.join(directory,'notes.txt'),'Synthetic fixture.');
+createFeed(version,filename,path.join(directory,'ephemeral.pub'),path.join(directory,'notes.txt'),directory);
