@@ -26,6 +26,9 @@ Var Checks
 
 Section
   StrCpy $FixtureRoot "$TEMP\oats-native-fixtures-${FIXTURE_ID}"
+  CreateDirectory "$FixtureRoot"
+  System::Call 'kernel32::GetLongPathNameW(w "$FixtureRoot",w .r0,i ${NSIS_MAX_STRLEN})'
+  StrCpy $FixtureRoot $0
   CreateDirectory "$FixtureRoot\old app"
   CreateDirectory "$FixtureRoot\current app"
   CreateDirectory "$FixtureRoot\foreign"

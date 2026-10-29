@@ -34,6 +34,13 @@ Function OatsVerifyInstallation
   GetFullPathName $OatsCandidate "$OatsCandidate"
   IfFileExists "$OatsCandidate\xx.exe" 0 oats_verify_done
   IfFileExists "$OatsCandidate\uninstall.exe" 0 oats_verify_done
+  ; ShellLink expands DOS 8.3 names. Compare and save the same long path form.
+  System::Call 'kernel32::GetLongPathNameW(w "$OatsCandidate",w .r0,i ${NSIS_MAX_STRLEN})i.r1'
+  ${If} $1 = 0
+  ${OrIf} $1 >= ${NSIS_MAX_STRLEN}
+    Return
+  ${EndIf}
+  StrCpy $OatsCandidate $0
   ; Never traverse junctions or symbolic links during automatic discovery.
   StrCpy $8 "$OatsCandidate\xx.exe"
   oats_verify_parent:
@@ -222,6 +229,7 @@ Function OatsRepairShortcuts
     StrCpy $OatsRepairFailed 1
     Return
   ${EndIf}
+  StrCpy $INSTDIR $OatsCandidate
   StrCpy $OatsLink "$SMPROGRAMS\oats.lnk"
   Call OatsRepairOneShortcut
   StrCpy $OatsLink "$SMPROGRAMS\xx.lnk"
