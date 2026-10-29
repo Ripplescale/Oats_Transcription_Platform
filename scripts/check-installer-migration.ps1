@@ -8,7 +8,7 @@ $root=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $directory=Join-Path ([IO.Path]::GetFullPath($OutputDirectory)) ('native-migration-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $directory -Force|Out-Null
 $compiler=Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
-foreach($fixture in @(@('old','oats','0.8.5'),@('legacy','xx','0.8.2'),@('current','oats','0.8.11'),@('foreign','Other app','0.8.5'))){
+foreach($fixture in @(@('old','oats','0.8.5'),@('legacy','xx','0.8.2'),@('current','oats','0.8.12'),@('foreign','Other app','0.8.5'),@('newer','oats','0.9.0'))){
     $source=Join-Path $directory ($fixture[0]+'.cs')
     # Fixtures supply real PE version resources; these applications are never run.
     $code='using System.Reflection; [assembly: AssemblyProduct("'+$fixture[1]+'")] [assembly: AssemblyFileVersion("'+$fixture[2]+'")] class Fixture { static void Main() {} }'

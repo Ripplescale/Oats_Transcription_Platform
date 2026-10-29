@@ -187,6 +187,11 @@ Function OatsRepairOneShortcut
   ${If} $OatsVerified <> 1
     Return
   ${EndIf}
+  ; A separate newer version is not an obsolete copy. Preserve its shortcut.
+  ${VersionCompare} $OatsInstalledVersion "${VERSION}" $0
+  ${If} $0 = 1
+    Return
+  ${EndIf}
   StrCpy $0 0
   !insertmacro ComHlpr_CreateInProcInstance ${CLSID_ShellLink} ${IID_IShellLink} r0 ""
   ${If} $0 P<> 0
