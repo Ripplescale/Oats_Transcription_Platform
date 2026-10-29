@@ -4,7 +4,7 @@ You only need **Oats-Setup.exe**. It downloads the app and everything needed for
 
 ## On the PC where you want to use oats
 
-1. Download **[Oats-Setup.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4dc/Oats-Setup.exe)**.
+1. Download **[Oats-Setup.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4dd/Oats-Setup.exe)**.
 2. Open it and click **Install oats**. If your copy says **Download and install**, that is the same option.
 3. Wait for setup to finish, then open **oats** from the Windows Start menu.
 4. In oats, open **About → Check for updates** and install any available update.
@@ -14,8 +14,6 @@ Allow microphone access if Windows asks. You do not need to install Python, use 
 The first download is about **11 GB**. Keep about **30 GB free** for the download and installation. Setup needs internet for this first download. Once installed, recording and speech recognition work without internet.
 
 If the download stops, reopen setup and choose the **same download folder**. It can continue from the files already there.
-
-The linked setup is the currently published version. The new button wording and additional speech check below take effect when the updated setup is published.
 
 ## Only if the other PC has no internet
 
@@ -52,6 +50,6 @@ Optional speaker identification is separate. You do not need it for recording, n
 2. Open the saved meeting, then **Tools → Transcription & versions**.
 3. Retry the transcription. You do not need to record the meeting again.
 
-For an older complete installation where both models fail, **[Oats-Repair.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4dc/Oats-Repair.exe)** can repair missing working folders. Click **Check / repair folders**, then retry the meeting. If it still fails, use **Copy report** to share the error details.
+For an older complete installation where both models fail, **[Oats-Repair.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4dd/Oats-Repair.exe)** can repair missing working folders. Click **Check / repair folders**, then retry the meeting. If it still fails, use **Copy report** to share the error details.
 
 Building oats from source? Use the separate [developer guide](DEVELOPER_SETUP.md).
