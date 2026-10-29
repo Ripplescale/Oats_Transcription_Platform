@@ -12,6 +12,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import Logo from '../Logo';
 import { About } from '../About';
 import { useProjectLibrary, projectLabel } from '@/hooks/useProjectLibrary';
+import { useLocalWorkflow } from '@/contexts/LocalWorkflowContext';
 
 export default function Sidebar() {
   const router = useRouter();
@@ -20,6 +21,7 @@ export default function Sidebar() {
   const { projects } = useProjectLibrary();
   const activeMeetingId = transcriptGroups[currentMeeting?.id ?? ''] ?? currentMeeting?.id;
   const { isRecording } = useRecordingState();
+  const { workflow } = useLocalWorkflow();
   const [query, setQuery] = useState('');
   const [about, setAbout] = useState(false);
   const [rename, setRename] = useState<CurrentMeeting | null>(null);
@@ -80,7 +82,7 @@ export default function Sidebar() {
     if (!remove || isRecording) return;
     setBusy(true);
     try {
-      await invoke('api_delete_meeting', { meetingId: remove.id });
+      await workflow.deleteMeeting(remove.id);
       setMeetings(meetings.filter(meeting => meeting.id !== remove.id));
       window.dispatchEvent(new Event('xx-projects-updated'));
       if (activeMeetingId === remove.id) { setCurrentMeeting(null); router.push('/'); }

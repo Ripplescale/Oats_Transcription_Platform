@@ -11,6 +11,7 @@ export interface DictationStatus {
   live_typing?: boolean;
   inserted_characters?: number;
   delivery_message?: string | null;
+  streaming_message?: string | null;
   message: string | null;
   microphone: string | null;
   available: boolean;

@@ -806,15 +806,34 @@ pub async fn list_project_library(state: tauri::State<'_, AppState>) -> Result<s
 pub async fn local_get_meeting_audio(app: tauri::AppHandle, state: tauri::State<'_, AppState>, meeting_id: String) -> Result<serde_json::Value, String> {
     let folder: Option<Option<String>> = sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
         .bind(meeting_id).fetch_optional(state.db_manager.pool()).await.map_err(|e| e.to_string())?;
-    let audio = folder.flatten().and_then(|p| ["audio.mp4", "audio.wav", "mixed.wav", "microphone.wav", "system.wav"].iter()
-        .map(|name| Path::new(&p).join(name)).find(|path| path.is_file()));
+    let folder=folder.flatten();
+    let audio = meeting_audio_path(folder.as_deref());
     if let Some(path) = &audio { app.asset_protocol_scope().allow_file(path).map_err(|e|e.to_string())?; }
     Ok(serde_json::json!({"path":audio.map(|p| p.to_string_lossy().to_string())}))
+}
+
+fn meeting_audio_path(folder: Option<&str>) -> Option<PathBuf> {
+    let folder=Path::new(folder?);
+    // Keep the source folder link for retained timeline/identity metadata, but
+    // never offer a preserved/partially removed file after explicit deletion.
+    if folder.join("source-audio-deleted.json").exists() { return None; }
+    ["audio.mp4", "audio.wav", "mixed.wav", "microphone.wav", "system.wav"].iter()
+        .map(|name| folder.join(name)).find(|path| path.is_file())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn removed_source_audio_is_not_offered_even_if_an_old_audio_file_remains() {
+        let root=tempfile::tempdir().unwrap();
+        fs::write(root.path().join("audio.wav"),b"partial old audio").unwrap();
+        let folder=root.path().to_str().unwrap();
+        assert_eq!(meeting_audio_path(Some(folder)),Some(root.path().join("audio.wav")));
+        fs::write(root.path().join("source-audio-deleted.json"),br#"{"state":"removing"}"#).unwrap();
+        assert_eq!(meeting_audio_path(Some(folder)),None);
+        assert_eq!(meeting_audio_path(None),None);
+    }
     fn snapshot_files(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
         let mut files: Vec<_> = fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().path())
             .filter(|path| path.is_file()).map(|path| {

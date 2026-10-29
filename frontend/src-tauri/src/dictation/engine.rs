@@ -314,6 +314,7 @@ impl Worker {
                 }
                 let mut descriptor = json!({"id": session_id, "final": final_request});
                 if live { descriptor["live"] = json!(true); }
+                if live && backend(&self.identity.config)? == "trelis" { descriptor["stable"] = json!(true); }
                 Some(descriptor)
             } else {
                 None
@@ -393,6 +394,10 @@ impl Worker {
                         return Err("The local dictation result has no text.".into());
                     }
                     if expected_stream.as_ref().is_some_and(|stream| stream["live"] == true) {
+                        if expected_stream.as_ref().unwrap()["stable"] == true
+                            && result["stable_policy"] != "local_agreement_v1" {
+                            return Err("The Trelis worker does not support live word agreement. Update oats before dictating.".into());
+                        }
                         validate_live_result(&result, expected_stream.as_ref().unwrap()["final"] == true,
                             backend(&self.identity.config)?)?;
                     }
@@ -472,14 +477,25 @@ fn validate_confirmed_live_result(result: &Value, final_request: bool) -> Result
 }
 
 fn validate_live_result(result: &Value, final_request: bool, selected: &str) -> Result<(), String> {
-    if selected == "trelis" { return validate_confirmed_live_result(result, final_request); }
+    if selected == "trelis" && result["live_delivery"] == "confirmed_phrases" {
+        return validate_confirmed_live_result(result, final_request);
+    }
     let valid = (|| {
         let samples = result["audio_sample_count"].as_u64()?;
         let confirmed = result["confirmed_samples"].as_u64()?;
         let words = result["confirmed_word_count"].as_u64()?;
         let draft = result["draft_text"].as_str()?;
         let text = result["text"].as_str()?;
-        Some(selected == "faster_whisper" && result["live_delivery"] == "stable_words"
+        if selected == "trelis" {
+            result["live_endpoint_available"].as_bool()?;
+            for name in ["delivery_error", "streaming_message"] {
+                if let Some(value) = result.get(name) {
+                    if !value.is_null() && value.as_str().is_none_or(|message| message.len() > 2000) { return None; }
+                }
+            }
+        }
+        Some((selected == "faster_whisper" || (selected == "trelis" && result["stable_policy"] == "local_agreement_v1"))
+            && result["live_delivery"] == "stable_words"
             && samples <= 120 * 16_000 && confirmed <= samples && words <= 32_768
             && draft.encode_utf16().count() <= 32_768 && text.encode_utf16().count() <= 32_768
             && !draft.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
@@ -488,7 +504,7 @@ fn validate_live_result(result: &Value, final_request: bool, selected: &str) -> 
             && (samples != 0 || (words == 0 && draft.is_empty())))
     })().unwrap_or(false);
     if valid { Ok(()) } else {
-        Err("The faster-whisper worker returned an invalid streaming result. Nothing further was typed.".into())
+        Err("The dictation worker returned an invalid streaming result. Nothing further was typed.".into())
     }
 }
 
@@ -746,6 +762,12 @@ mod tests {
                         result["audio_sample_count"] = json!(32_000);
                         result["confirmed_samples"] = json!(32_000);
                         result["confirmed_phrase_count"] = json!(1);
+                        if stream["stable"] == true {
+                            result["live_delivery"] = json!("stable_words");
+                            result["stable_policy"] = json!("local_agreement_v1");
+                            result["confirmed_word_count"] = json!(5);
+                            result["draft_text"] = json!("");
+                        }
                     }
                     match mode.as_str() {
                         "stream_wrong_id" => {
@@ -1021,6 +1043,13 @@ mod tests {
             "audio_sample_count":32000,"confirmed_samples":0,"confirmed_word_count":1});
         assert!(validate_live_result(&stable, false, "faster_whisper").is_ok());
         assert!(validate_live_result(&stable, false, "trelis").is_err());
+        let mut trelis = stable.clone();
+        trelis["stable_policy"] = json!("local_agreement_v1");
+        trelis["live_endpoint_available"] = json!(false);
+        trelis["streaming_message"] = json!("Pause detection is unavailable; word agreement continues.");
+        assert!(validate_live_result(&trelis, false, "trelis").is_ok());
+        trelis["delivery_error"] = json!(true);
+        assert!(validate_live_result(&trelis, false, "trelis").is_err());
         assert!(validate_live_result(&stable, true, "faster_whisper").is_err());
         let mut final_result = stable.clone();
         final_result["draft_text"] = json!(""); final_result["confirmed_samples"] = json!(32000);
@@ -1075,7 +1104,7 @@ mod tests {
             let request = id();
             let reply = worker.transcribe_live(&request, b"synthetic pcm", &AtomicBool::new(false),
                 Duration::from_secs(5), &session, final_request).unwrap().unwrap();
-            assert_eq!(reply["stream"], json!({"id":session,"final":final_request,"live":true}));
+            assert_eq!(reply["stream"], json!({"id":session,"final":final_request,"live":true,"stable":true}));
             assert!(!reply["text"].as_str().unwrap().is_empty());
             assert_eq!(worker.child.as_ref().unwrap().id(), pid);
             assert!(!worker.root.path().join(request).exists());

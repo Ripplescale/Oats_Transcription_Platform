@@ -4,6 +4,14 @@
 
 oats is a local Windows desktop app for recording calls, keeping the audio, and working with Hindi–English transcripts. It builds on Meetily Community with a local inference worker and a notes-first workspace.
 
+## Get started
+
+Download **[Oats-Setup.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4dc/Oats-Setup.exe)**, open it on the PC where you want oats, and click **Install oats** (older copies say **Download and install**). Setup downloads everything needed. When it finishes, open **oats** from the Windows Start menu and check **About → Check for updates**.
+
+The first download is about **11 GB**; keep **30 GB free**. No Python, terminal commands or accounts are needed. See the **[short installation guide](docs/COMPLETE_SETUP.md)**. Only use **Download for another PC** (older wording: **Save for offline setup**) if you need to transfer setup to a PC without internet.
+
+Existing users should use the app's update notification or **About → Check for updates**. Developers building from source can use the **[developer guide](docs/DEVELOPER_SETUP.md)**. **[How it works](docs/HOW_IT_WORKS.md)** explains capture, models, revisions, retries, and storage. **[Privacy](PRIVACY_POLICY.md)** describes local processing and manual export.
+
 ![oats compact notes workspace with recording playback and an expandable transcript](docs/assets/xx-workspace.png)
 
 *The screenshot uses fictional conversations, names, and quantities.*
@@ -24,14 +32,6 @@ oats is a local Windows desktop app for recording calls, keeping the audio, and 
 - Runs optional Community-1 speaker identification locally after recording and transcription complete.
 - Lets you copy a corrected transcript into Claude or export a text attachment. You choose when to send it. There is no Qwen summary model or automatic Claude/API upload.
 - Includes an optional evidence-backed project Vault for verified names, terms, and quantities. Vault entries do not silently rewrite what a model heard.
-
-## Get started
-
-For a new Windows PC, download **[Oats-Setup.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4dc/Oats-Setup.exe)** and choose **Download and install**. It fetches all components from GitHub. Choose **Save for offline setup** to keep a complete folder you can copy to another PC. The download is about **10.4 GiB**; allow **30 GiB free** when keeping the downloaded parts and installed runtime on the same drive. See **[complete setup and hardware requirements](docs/COMPLETE_SETUP.md)**.
-
-If a complete installation shows “needs attention” for both Trelis and Apex, run **[Oats-Repair.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4dc/Oats-Repair.exe)**, choose **Check / repair folders**, then retry the saved transcription. Earlier setup builds omitted two required working directories. No model download or app reinstallation is needed.
-
-Existing users should use the app's update notification or **About → Check for updates**. Read **[Windows setup](docs/SETUP.md)** for developer setup. **[How it works](docs/HOW_IT_WORKS.md)** explains capture, models, revisions, retries, and storage. **[Privacy](PRIVACY_POLICY.md)** describes local processing and manual export.
 
 See [oats 0.7.4 release notes](docs/releases/0.7.4.md) for speech recovery, chat bubbles, and the paired desktop/worker update.
 

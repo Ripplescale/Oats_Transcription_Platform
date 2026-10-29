@@ -9,6 +9,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { useProjectLibrary, projectLabel, type Project, type LibraryNote } from '@/hooks/useProjectLibrary';
 import { useSidebar } from './Sidebar/SidebarProvider';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { useLocalWorkflow } from '@/contexts/LocalWorkflowContext';
 import { Brand } from './Brand';
 import './note-library-actions.css';
 
@@ -18,6 +19,7 @@ export function NoteLibrary({ onNewNote, busy, recovery }: { onNewNote: (project
   const router = useRouter();
   const { currentMeeting, setCurrentMeeting, transcriptGroups, refetchMeetings } = useSidebar();
   const { isRecording } = useRecordingState();
+  const { workflow } = useLocalWorkflow();
   const [selected, setSelected] = useState('all');
   const [query, setQuery] = useState('');
   const [tagFilter, setTagFilter] = useState('');
@@ -114,7 +116,7 @@ export function NoteLibrary({ onNewNote, busy, recovery }: { onNewNote: (project
       } else if (action.kind === 'tags') {
         await invoke('set_meeting_tags', { meetingId, expectedTags: action.note.tags, tags: nextTags });
       } else {
-        await invoke('api_delete_meeting', { meetingId });
+        await workflow.deleteMeeting(meetingId);
         if ((transcriptGroups[currentMeeting?.id ?? ''] ?? currentMeeting?.id) === meetingId) setCurrentMeeting(null);
       }
       await changed(); setAction(null);

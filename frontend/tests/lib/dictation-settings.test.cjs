@@ -87,8 +87,8 @@ test('A registered Copilot binding is untested until observed; idle keeps the la
 test('The current backend labels its model and live-word or phrase instructions', async () => {
   const f = fixture(); let renderer;
   await act(async () => { renderer = create(React.createElement(f.Component)); await flush(); });
-  assert.match(JSON.stringify(renderer.toJSON()), /Trelis · confirmed phrases/);
-  assert.match(JSON.stringify(renderer.toJSON()), /Text appears in short phrases as you pause/);
+  assert.match(JSON.stringify(renderer.toJSON()), /Trelis · live words/);
+  assert.match(JSON.stringify(renderer.toJSON()), /Text appears as you speak/);
   f.status.backend = 'faster_whisper';
   await act(async () => { f.interval(); await flush(); });
   assert.match(JSON.stringify(renderer.toJSON()), /faster-whisper · live words/);
@@ -142,6 +142,19 @@ test('Drafts hide after cancellation, failure, completion and a fresh session st
   f.status.phase = 'listening'; f.status.draft_text = 'new session words';
   await act(async () => { f.interval(); await flush(); });
   assert.deepEqual(renderer.root.findByProps({ 'aria-label': 'Tentative dictation draft' }).children, ['new session words']);
+  assert.ok(f.calls.every(call => call.command === 'dictation_status'));
+  await act(async () => renderer.unmount());
+});
+
+test('Degraded pause detection stays visible while live Trelis typing continues, then clears on recovery', async () => {
+  const warning = 'Pause detection is unavailable. Streaming continues with word agreement.';
+  const f = fixture({ phase: 'listening', backend: 'trelis', live_typing: true, streaming_message: warning }); let renderer;
+  await act(async () => { renderer = create(React.createElement(f.Component)); await flush(); });
+  assert.match(JSON.stringify(renderer.toJSON()), /Pause detection is unavailable/);
+  assert.equal(button(renderer, 'Copy result'), undefined);
+  f.status.streaming_message = null;
+  await act(async () => { f.interval(); await flush(); });
+  assert.doesNotMatch(JSON.stringify(renderer.toJSON()), /Pause detection is unavailable/);
   assert.ok(f.calls.every(call => call.command === 'dictation_status'));
   await act(async () => renderer.unmount());
 });

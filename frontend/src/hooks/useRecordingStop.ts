@@ -122,7 +122,12 @@ export function useRecordingStop(
   const handleRecordingStop = useCallback(async (isCallApi: boolean) => {
     // Durable capture events own the local workflow. Model processing continues
     // independently; this callback must not resave or wait on the retired engine.
-    if (LOCAL_TRANSCRIPT_ONLY) { setIsRecording(false); setIsRecordingDisabled(false); return; }
+    if (LOCAL_TRANSCRIPT_ONLY) {
+      await recordingState.refreshState();
+      // Reconciliation also settles failed finalization, which has no success
+      // event. Never unlock capture while the native owner is still stopping.
+      return;
+    }
     if (recordingStoppedDataRef.current) {
       await recordingStoppedDataRef.current;
     }
@@ -428,6 +433,7 @@ export function useRecordingStop(
     setIsRecording,
     setIsRecordingDisabled,
     setStatus,
+    recordingState.refreshState,
     transcriptsRef,
     flushBuffer,
     clearTranscripts,

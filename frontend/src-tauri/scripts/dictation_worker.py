@@ -13,6 +13,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 from pathlib import Path
 import socket
 import stat
@@ -29,6 +30,9 @@ MAX_PROTOCOL_BYTES = 4096
 MAX_WORKER_REQUESTS = 4096
 MAX_STREAM_WINDOWS = MAX_SECONDS // WINDOW_SECONDS
 MAX_LIVE_PHRASES = 256
+AGREEMENT_TAIL_WORDS = 2
+AGREEMENT_ANCHOR_WORDS = 8
+AGREEMENT_WINDOW_SAMPLES = 20 * 16000
 LIVE_SILENCE_SAMPLES = 9600  # 600 ms, rounded up to complete Silero frames
 LIVE_PADDING_SAMPLES = 1600
 LIVE_NORMALIZATION_GUARD_SAMPLES = 1600
@@ -186,18 +190,22 @@ def stream_descriptor(request):
         return None
     stream = request["stream"]
     if (not isinstance(stream, dict) or not {"id", "final"} <= set(stream)
-            or set(stream) - {"id", "final", "live"} or type(stream["final"]) is not bool):
+            or set(stream) - {"id", "final", "live", "stable"} or type(stream["final"]) is not bool):
         raise ValueError("Dictation stream requires a canonical UUID and a boolean final flag")
     descriptor = {"id": canonical_id(stream["id"]), "final": stream["final"]}
     if "live" in stream:
         if type(stream["live"]) is not bool:
             raise ValueError("Dictation stream live flag must be a boolean")
         descriptor["live"] = stream["live"]
+    if "stable" in stream:
+        if type(stream["stable"]) is not bool or not stream.get("live"):
+            raise ValueError("Stable dictation requires a live stream and a boolean stable flag")
+        descriptor["stable"] = stream["stable"]
     return descriptor
 
 
 class StreamCache:
-    """One session: legacy completed windows or immutable finalized live phrases."""
+    """One session: completed windows, finalized phrases, or live word agreement."""
     def __init__(self):
         self.clear()
 
@@ -213,13 +221,14 @@ class StreamCache:
         self.phrases = []
         self.confirmed_samples = 0
         self.endpoint_failed = False
+        self.agreement = None
 
     def configure(self, stream, spec, runtime, gate_config, infer, gate, complete_samples, endpoint=None):
         if stream is None:
             self.clear()
             return
         settings = hashlib.sha256(json.dumps(
-            [spec, runtime, gate_config, stream.get("live", False)],
+            [spec, runtime, gate_config, stream.get("live", False), stream.get("stable", False)],
             sort_keys=True, allow_nan=False).encode("utf-8")).digest()
         if self.identity != stream["id"] or self.settings != settings or self.adapters != (infer, gate, endpoint):
             self.clear()
@@ -494,7 +503,135 @@ def decode_confirmed_phrase(samples, start, end, directory, spec, runtime, confi
     return " ".join(pieces), windows, timing
 
 
+def agreement_suffix(words, committed, rolling):
+    """Exact, unique overlap only. Never guess between repeated occurrences."""
+    if not committed:
+        return words
+    if not rolling:
+        return words[len(committed):] if words[:len(committed)] == committed else None
+    count = min(AGREEMENT_ANCHOR_WORDS, len(committed))
+    if count < 3:
+        return None
+    anchor = committed[-count:]
+    matches = [i + count for i in range(len(words) - count + 1) if words[i:i + count] == anchor]
+    return words[matches[0]:] if len(matches) == 1 else None
+
+
+def agreement_live(samples, directory, stream, spec, runtime, config, infer, gate, cache, endpoint):
+    """Append-only local agreement with a bounded 20-second inference window.
+
+    Two distinct audio prefixes must agree exactly before unfinished words are
+    typed. Two trailing words remain provisional. Silence/Stop flushes the tail.
+    Window rollover requires one unique eight-word frontier (at least three);
+    uncertainty stops delivery rather than guessing an overlap or editing input.
+    """
+    cache = cache if cache is not None else StreamCache()
+    endpoint = endpoint or find_live_endpoints
+    cache.configure(stream, spec, runtime, config.get("speech_gate"), infer, gate, 0, endpoint)
+    if cache.agreement is None:
+        cache.agreement = {"closed": [], "committed": [], "previous": [], "previous_end": 0,
+                           "section": 0, "verified": 0, "hash": None, "blocked": None,
+                           "endpoint_available": True, "last_key": None, "last_words": []}
+    state = cache.agreement
+    if len(samples) < state["verified"] or (state["hash"] is not None and
+            hashlib.sha256(samples[:state["verified"]].tobytes()).digest() != state["hash"]):
+        raise ValueError("Previously observed dictation audio changed")
+    # resample_poly can revise its last filter-edge samples as audio grows.
+    state["verified"] = max(0, len(samples) - LIVE_NORMALIZATION_GUARD_SAMPLES)
+    state["hash"] = hashlib.sha256(samples[:state["verified"]].tobytes()).digest()
+    began = time.monotonic()
+    try:
+        decision = endpoint(samples, max(state["section"], len(samples) - AGREEMENT_WINDOW_SAMPLES),
+                            config.get("speech_gate"))
+        state["endpoint_available"] = isinstance(decision, dict) and decision.get("available") is True
+    except Exception:
+        decision, state["endpoint_available"] = {}, False
+    boundaries = []
+    if state["endpoint_available"]:
+        points = decision.get("endpoints", [])
+        if not isinstance(points, list) or any(not isinstance(p, dict) for p in points):
+            points, state["endpoint_available"] = [], False
+        for point in points:
+            end, speech_end = point.get("end_sample"), point.get("vad_speech_end_sample")
+            if (type(end) is int and type(speech_end) is int and state["section"] < speech_end <= end < len(samples)
+                    and end - speech_end == LIVE_PADDING_SAMPLES
+                    and type(point.get("confirmed_silence_samples")) is int
+                    and point["confirmed_silence_samples"] >= LIVE_SILENCE_SAMPLES
+                    and len(samples) - speech_end >= point["confirmed_silence_samples"]
+                    and len(samples) - end >= LIVE_NORMALIZATION_GUARD_SAMPLES):
+                boundaries.append(end)
+            else:
+                boundaries, state["endpoint_available"] = [], False
+                break
+    # At most two decodes: latest confirmed pause, then the newest prefix.
+    pause = max(boundaries, default=None)
+    jobs = [(pause, True)] if pause is not None else []
+    if not jobs or len(samples) - pause >= 16000 or stream["final"]:
+        if not jobs or jobs[-1][0] != len(samples):
+            jobs.append((len(samples), stream["final"]))
+    windows, draft = [], ""
+    timing = {"endpoint_seconds": time.monotonic() - began, "gate_seconds": 0., "inference_seconds": 0.}
+    for end, flush in jobs:
+        start = max(state["section"], end - AGREEMENT_WINDOW_SAMPLES)
+        key = (start, end, hashlib.sha256(samples[start:end].tobytes()).digest())
+        if key == state["last_key"]:
+            words = state["last_words"]
+        else:
+            text, measured, elapsed = decode_confirmed_phrase(samples, start, end, directory,
+                                                             spec, runtime, config, infer, gate)
+            words = re.findall(r"\S+", text)
+            windows.extend(measured)
+            for name in ("gate_seconds", "inference_seconds"):
+                timing[name] += elapsed[name]
+            state["last_key"], state["last_words"] = key, words
+        suffix = agreement_suffix(words, state["committed"], start > state["section"])
+        if suffix is None:
+            state["blocked"] = "Speech recognition revised earlier words or lost its overlap. Automatic typing paused; finish to review the full text."
+            draft = " ".join(words)
+            continue
+        if state["blocked"] is not None:
+            draft = " ".join(suffix)
+            continue
+        count = 0
+        if flush:
+            count = len(suffix)
+        elif end > state["previous_end"]:
+            for old, new in zip(state["previous"], suffix):
+                if old != new:
+                    break
+                count += 1
+            count = max(0, count - AGREEMENT_TAIL_WORDS)
+        state["committed"].extend(suffix[:count])
+        draft = " ".join(suffix[count:])
+        state["previous"] = suffix[count:]
+        state["previous_end"] = end
+        if flush:
+            state["closed"].extend(state["committed"])
+            state["committed"], state["previous"] = [], []
+            state["section"] = end
+    text = " ".join([*state["closed"], *state["committed"]])
+    if stream["final"] and state["blocked"]:
+        # A review result owns the complete original clip, not guessed overlap.
+        text, measured, elapsed = decode_confirmed_phrase(samples, 0, len(samples), directory,
+                                                         spec, runtime, config, infer, gate)
+        windows.extend(measured)
+        for name in ("gate_seconds", "inference_seconds"):
+            timing[name] += elapsed[name]
+    if len(text.encode("utf-8")) + len(draft.encode("utf-8")) > MAX_JSON_BYTES:
+        raise ValueError("Dictation stream text is too large")
+    return {"text": text, "draft_text": "" if stream["final"] else draft,
+            "live_delivery": "stable_words", "stable_policy": "local_agreement_v1",
+            "confirmed_word_count": len(re.findall(r"\S+", text)),
+            "confirmed_samples": len(samples) if stream["final"] else state["section"],
+            "audio_sample_count": len(samples), "live_endpoint_available": state["endpoint_available"],
+            "delivery_error": state["blocked"],
+            "streaming_message": None if state["endpoint_available"] else "Pause detection is unavailable. Streaming continues with word agreement; the last words arrive when you finish.",
+            "windows": windows, "timing": timing, "cache_hit_count": 0}
+
+
 def confirmed_live(samples, directory, stream, spec, runtime, config, infer, gate, cache, endpoint):
+    if stream.get("stable"):
+        return agreement_live(samples, directory, stream, spec, runtime, config, infer, gate, cache, endpoint)
     cache = cache if cache is not None else StreamCache()
     endpoint = endpoint or find_live_endpoints
     cache.configure(stream, spec, runtime, config.get("speech_gate"), infer, gate, 0, endpoint)

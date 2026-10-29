@@ -1,5 +1,6 @@
 //! Append-only delivery of cumulative, confirmed dictation text. The worker
-//! finalizes speech phrases before publication. No provisional hypotheses,
+//! finalizes speech phrases or confirms repeated word-prefix agreement before
+//! publication. No provisional drafts,
 //! alignment guesses, or edits to already-delivered text are accepted here.
 
 const MAX_INSERT_UTF16: usize = 32_768;

@@ -82,6 +82,23 @@ test('concurrent checks share one metadata request', async () => {
   assert.equal(calls, 1); resolve(available()); await Promise.all([first, second]);
 });
 
+test('an offline launch retries immediately when connectivity returns', async () => {
+  const f = fixture(); f.fail = 'updates_check';
+  await assert.rejects(f.service.checkOnOpen(), /Offline/);
+  f.now += 10_000; f.fail = null;
+  await f.service.checkOnOpen();
+  assert.deepEqual(f.calls.map(x => x.command), ['updates_check', 'updates_check']);
+  await f.service.checkOnOpen();
+  assert.equal(f.calls.length, 2);
+  f.status = { ...available(), state: 'error', error: 'Network unavailable' };
+  f.now += 60_001;
+  await f.service.checkOnOpen();
+  f.status = available(); f.now += 1_000;
+  await f.service.checkOnOpen();
+  assert.equal(f.calls.length, 4);
+  assert.equal(f.prepares, 0);
+});
+
 test('explicit download only stages; install flushes notes before the separate native command', async () => {
   const f = fixture(); const order = [];
   f.safety.registerUpdateSaveGuard(async () => { order.push('saved'); });

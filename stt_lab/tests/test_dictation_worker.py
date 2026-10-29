@@ -415,7 +415,7 @@ class DictationWorkerTests(unittest.TestCase):
             self.assertEqual(result['windows'][0]['runtime_timing']['total_seconds'], index)
 
     def stream_run(self, cache, stream_id, *, seconds=20.1, final=False, rate=16000,
-                   samples=None, infer=None, gate=None, language='hinglish', live=None, endpoint=None):
+                   samples=None, infer=None, gate=None, language='hinglish', live=None, endpoint=None, stable=None):
         if samples is None:
             self.wav(seconds=seconds, rate=rate)
         else:
@@ -427,6 +427,8 @@ class DictationWorkerTests(unittest.TestCase):
                    'stream': {'id': stream_id, 'final': final}}
         if live is not None:
             request['stream']['live'] = live
+        if stable is not None:
+            request['stream']['stable'] = stable
         self.request.write_text(json.dumps(request), encoding='utf-8')
         return worker.run(self.config, self.request, infer=infer or self.infer, gate=gate or self.gate,
                           cache=cache, endpoint=endpoint)
@@ -655,6 +657,112 @@ class DictationWorkerTests(unittest.TestCase):
             cursor = phrase['end_sample']
         self.assertEqual(cursor, result['confirmed_samples'])
         self.assertEqual(len(result['confirmed_ranges']), result['confirmed_phrase_count'])
+
+    def test_stable_trelis_continuous_speech_types_before_stop_and_final_adds_tail(self):
+        cache, identity = worker.StreamCache(), str(uuid.uuid4())
+        endpoint = self.endpoints_after([])
+        hypotheses = iter(['one two three four five', 'one two three four five six seven',
+                           'one two three four five six seven eight nine',
+                           'one two three four five six seven eight nine ten'])
+        def infer(*args):
+            return {'status': 'ok', 'text': next(hypotheses)}
+        results = [self.stream_run(cache, identity, seconds=n, live=True, stable=True,
+                                  endpoint=endpoint, infer=infer, final=n == 8) for n in (2, 4, 6, 8)]
+        self.assertEqual(results[0]['text'], '')
+        self.assertEqual(results[1]['text'], 'one two three')
+        self.assertEqual(results[2]['text'], 'one two three four five')
+        self.assertEqual(results[3]['text'], 'one two three four five six seven eight nine ten')
+        self.assertTrue(all(b['text'].startswith(a['text']) for a, b in zip(results, results[1:])))
+        self.assertEqual(results[-1]['draft_text'], '')
+
+    def test_stable_trelis_rolling_windows_are_bounded_and_do_not_duplicate_words(self):
+        cache, identity = worker.StreamCache(), str(uuid.uuid4())
+        endpoint = self.endpoints_after([])
+        original = np.repeat(np.arange(1, 49, dtype=np.int16), 16000)
+        lengths = []
+        def infer(_spec, audio, _runtime):
+            with wave.open(str(audio), 'rb') as wav:
+                pcm = np.frombuffer(wav.readframes(wav.getnframes()), dtype='<i2')
+            lengths.append(len(pcm))
+            return {'status': 'ok', 'text': ' '.join(f'word{i}' for i in range(int(pcm[0]) - 1, int(pcm[-1])))}
+        previous = ''
+        for seconds in range(2, 49, 2):
+            result = self.stream_run(cache, identity, samples=original[:seconds * 16000], live=True,
+                                     stable=True, final=seconds == 48, endpoint=endpoint, infer=infer)
+            self.assertIsNone(result['delivery_error'])
+            self.assertTrue(result['text'].startswith(previous))
+            previous = result['text']
+        self.assertLessEqual(max(lengths), 20 * 16000)
+        self.assertEqual(result['text'], ' '.join(f'word{i}' for i in range(48)))
+
+    def test_stable_trelis_endpoint_failure_keeps_streaming_and_recovers_visibly(self):
+        cache, identity = worker.StreamCache(), str(uuid.uuid4())
+        count = [0]
+        def endpoint(*args):
+            count[0] += 1
+            return {'available': count[0] > 1, 'endpoints': []}
+        first = self.stream_run(cache, identity, seconds=2, live=True, stable=True, endpoint=endpoint)
+        second = self.stream_run(cache, identity, seconds=4, live=True, stable=True, endpoint=endpoint)
+        self.assertIn('Pause detection is unavailable', first['streaming_message'])
+        self.assertIsNone(second['streaming_message'])
+        self.assertTrue(second['text'])
+        self.assertIsNone(second['delivery_error'])
+
+    def test_stable_trelis_revision_or_ambiguous_overlap_never_inserts_guessed_tail(self):
+        self.assertIsNone(worker.agreement_suffix(['a', 'b', 'c', 'x', 'a', 'b', 'c'], ['a', 'b', 'c'], True))
+        cache, identity = worker.StreamCache(), str(uuid.uuid4())
+        endpoint = self.endpoints_after([])
+        hypotheses = iter(['one two three four five', 'one two three four five six',
+                           'changed words should not be typed', 'corrected full text', 'corrected full text'])
+        def infer(*args):
+            return {'status': 'ok', 'text': next(hypotheses)}
+        self.stream_run(cache, identity, seconds=2, live=True, stable=True, endpoint=endpoint, infer=infer)
+        before = self.stream_run(cache, identity, seconds=4, live=True, stable=True, endpoint=endpoint, infer=infer)
+        revised = self.stream_run(cache, identity, seconds=6, live=True, stable=True, endpoint=endpoint, infer=infer)
+        self.assertEqual(revised['text'], before['text'])
+        self.assertIn('Automatic typing paused', revised['delivery_error'])
+        final = self.stream_run(cache, identity, seconds=8, final=True, live=True, stable=True, endpoint=endpoint, infer=infer)
+        self.assertEqual(final['text'], 'corrected full text')
+        self.assertTrue(final['delivery_error'])
+
+    def test_stable_trelis_repeated_identical_prefix_cannot_confirm_its_own_draft(self):
+        cache, identity = worker.StreamCache(), str(uuid.uuid4())
+        endpoint = self.endpoints_after([])
+        for _ in range(3):
+            result = self.stream_run(cache, identity, seconds=4, live=True, stable=True, endpoint=endpoint)
+            self.assertEqual(result['text'], '')
+
+    def test_stable_trelis_pause_flushes_short_phrase_once_and_stop_does_not_repeat_it(self):
+        cache, identity = worker.StreamCache(), str(uuid.uuid4())
+        endpoint = self.endpoints_after([2 * 16000])
+        original = np.concatenate((np.full(2 * 16000, 5000, dtype=np.int16), np.zeros(4 * 16000, dtype=np.int16)))
+        first = self.stream_run(cache, identity, samples=original[:2 * 16000], live=True, stable=True, endpoint=endpoint)
+        self.assertEqual(first['text'], '')
+        paused = self.stream_run(cache, identity, samples=original[:4 * 16000], live=True, stable=True, endpoint=endpoint)
+        self.assertEqual(paused['text'], 'आज की notes are ready.')
+        final = self.stream_run(cache, identity, samples=original, live=True, stable=True, final=True, endpoint=endpoint)
+        self.assertEqual(final['text'], paused['text'])
+        self.assertIsNone(final['delivery_error'])
+
+    def test_stable_trelis_malformed_pause_diagnostics_degrade_without_stopping_agreement(self):
+        for points in (None, 'invalid', [None], [{'end_sample': -1}]):
+            cache, identity = worker.StreamCache(), str(uuid.uuid4())
+            endpoint = lambda *_: {'available': True, 'endpoints': points}
+            first = self.stream_run(cache, identity, seconds=2, live=True, stable=True, endpoint=endpoint)
+            second = self.stream_run(cache, identity, seconds=4, live=True, stable=True, endpoint=endpoint)
+            self.assertFalse(first['live_endpoint_available'])
+            self.assertTrue(second['text'])
+            self.assertIsNone(second['delivery_error'])
+
+    def test_stable_trelis_replaced_audio_is_rejected_and_cache_is_cleared(self):
+        cache, identity = worker.StreamCache(), str(uuid.uuid4())
+        endpoint = self.endpoints_after([])
+        original = np.full(4 * 16000, 5000, dtype=np.int16)
+        self.stream_run(cache, identity, samples=original[:2 * 16000], live=True, stable=True, endpoint=endpoint)
+        original[0] = 6000
+        with self.assertRaisesRegex(ValueError, 'Previously observed dictation audio changed'):
+            self.stream_run(cache, identity, samples=original, live=True, stable=True, endpoint=endpoint)
+        self.assertIsNone(cache.agreement)
 
     def test_live_unresolved_speech_never_returns_or_decodes_partial_hypotheses(self):
         cache, identity = worker.StreamCache(), str(uuid.uuid4())

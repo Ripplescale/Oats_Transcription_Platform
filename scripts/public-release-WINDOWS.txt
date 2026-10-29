@@ -1,5 +1,29 @@
-oats for Windows x64
+oats for Windows
 
+Open oats from the Windows Start menu. Opening the app does not start recording.
+
+Installing on a new PC
+Download Oats-Setup.exe and click Install oats. Older copies call this
+Download and install. Setup downloads the app and speech models for you.
+You do not need to install Python or run terminal commands.
+
+Installation guide:
+https://github.com/Ripplescale/Oats_Transcription_Platform/blob/main/docs/COMPLETE_SETUP.md
+
+Updating oats
+Inside oats, open About, choose Check for updates, then download and install
+the offered update. You do not need the large setup again.
+Updates keep your notes, recordings and downloaded speech models.
+
+Your first recording
+Click New note, speak for a short time, then click Finish recording.
+Check that you can play the audio and read its transcript.
+CPU mode prepares meeting transcripts after recording finishes.
+
+Interrupted recordings
+Home shows Saved audio recovery when an interrupted recording needs attention.
+Choose Recover saved audio, or Delete saved audio if you no longer need it.
+Deleting recovery audio keeps notes and transcript text already saved in oats.
 Open oats from Start. Opening the app does not start recording.
 
 This package contains the desktop application and its native audio dependencies.

@@ -35,6 +35,7 @@
     ui.dictation.dataset.phase = next.phase;
     ui.title.textContent = actionError && active(next.phase) ? 'Action needs retry'
       : next.phase === 'listening' && next.delivery_message ? 'Listening for copy'
+      : next.phase === 'listening' && next.streaming_message ? 'Listening · check Settings'
       : next.phase === 'listening' && next.live_typing && next.inserted_characters > 0 ? 'Typing live' : labels[next.phase];
     ui.elapsed.textContent = time(next.elapsed_seconds);
     ui.elapsed.hidden = !active(next.phase);
@@ -56,6 +57,7 @@
     ui.hint.removeAttribute('aria-label');
     if (actionError && active(next.phase)) ui.hint.textContent = actionError;
     else if (active(next.phase) && next.delivery_message) ui.hint.textContent = next.phase === 'listening' ? 'Listening. Finish to copy your text.' : 'Finishing. Your text will be ready to copy.';
+    else if (active(next.phase) && next.streaming_message) ui.hint.textContent = next.streaming_message;
     else if (draft) {
       ui.hint.textContent = `Draft: ${draft}`;
       ui.hint.dataset.draft = 'true';

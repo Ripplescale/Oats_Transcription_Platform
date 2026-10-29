@@ -47,9 +47,30 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, item_id: &str) {
                 let _ = window.eval("window.location.assign('/settings')");
             }
         }
-        "quit" => app.exit(0),
+        "quit" => request_quit(app),
         _ => {}
     }
+}
+
+/// A deliberate Quit drains active meeting audio before the process exits.
+/// A stalled driver keeps the app open with its source files and quarantine.
+pub(crate) fn request_quit<R: Runtime>(app: &AppHandle<R>) {
+    static QUIT_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if QUIT_PENDING.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = if crate::audio::recording_commands::capture_in_progress() {
+            crate::audio::recording_commands::stop_recording(app.clone(), crate::audio::recording_commands::RecordingArgs { save_path:String::new() }).await
+        } else { Ok(()) };
+        QUIT_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        match result {
+            Ok(()) => app.exit(0),
+            Err(error) => {
+                let _ = app.emit("recording-error", format!("oats stayed open to protect the recording. {error}"));
+                focus_main_window(&app);
+            }
+        }
+    });
 }
 fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
     focus_main_window(app);
@@ -246,6 +267,9 @@ async fn get_current_recording_state() -> RecordingState {
         return RecordingState::Stopped;
     }
 
+    if crate::audio::recording_commands::get_recording_state().await["is_stopping"] == true {
+        return RecordingState::Stopping;
+    }
     // Check if paused
     let is_paused = crate::audio::recording_commands::is_recording_paused().await;
     log::info!("Tray: is_paused: {}", is_paused);

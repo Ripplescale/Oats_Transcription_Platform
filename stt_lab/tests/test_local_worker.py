@@ -20,6 +20,25 @@ from sttbench.runtime.api import _read_pcm
 class LocalWorkerTests(unittest.TestCase):
     recovery_text = 'The speaker describes several distinct points and completes the previously interrupted thought clearly'
 
+    def test_finalized_cpu_live_final_request_completes_without_live_gpu_qualification(self):
+        row=self.chunk(0,np.ones(5*16000)*1000)
+        config,request=self.transcription_job([row],final_time=5)
+        settings=read_json(config)
+        settings['models']['trelis']={'backend':'transformers','device':'cpu'}
+        write_json(config,settings)
+        document=read_json(request); document['workflow_role']='live-final'; write_json(request,document)
+        calls=[]
+        def infer(spec,audio,runtime):
+            calls.append((runtime['backend'],runtime['device']))
+            return {'status':'ok','text':self.recovery_text}
+        result=self.run_synthetic(config,request,infer)
+        self.assertEqual(result['state'],'complete',result.get('error'))
+        self.assertEqual(result['cursors']['microphone'],5)
+        self.assertEqual(result['segments'][0]['text'],self.recovery_text)
+        self.assertTrue(calls)
+        self.assertTrue(all(pair==('transformers','cpu') for pair in calls))
+        self.assertEqual(read_json(request.parent/'status.json'),result)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='stt-worker-synthetic-')
         self.addCleanup(self.temp.cleanup)
@@ -498,7 +517,11 @@ class LocalWorkerTests(unittest.TestCase):
             worker.recover_pending_segment(status,job/'status.json',job,{'id':'trelis'}, {},self.session,
                 [row],'microphone',True,infer=lambda *args:{'status':'ok','text':self.recovery_text},
                 gate=self.keep_gate)
-        self.assertEqual(len(snapshots),2)
+        self.assertEqual(len(snapshots),4)
+        self.assertEqual([len(s['segments'][-1]['recovery']['attempts']) for s in snapshots],[0,1,1,2],
+                         'Each model attempt publishes its running phase before its completed result')
+        self.assertTrue(all(s['state']=='running' and s['phase']=='recovering_context' for s in snapshots))
+        snapshots=snapshots[1::2]  # Completed attempt timestamps remain strictly newer.
         self.assertEqual([s['segments_revision'] for s in snapshots],[2,2])
         self.assertEqual([s['updated_at'] for s in snapshots],[first.isoformat(),second.isoformat()])
         self.assertLess(datetime.fromisoformat(snapshots[0]['updated_at']),
@@ -610,12 +633,16 @@ class LocalWorkerTests(unittest.TestCase):
         first = self.chunk(0, np.ones(16000)*1000)
         config, request = self.transcription_job([first])
         snapshots, waits, calls = [], [], []
+        recovery_states = []
         original_write = worker.write_json
         def checkpoint(path, value):
             snapshots.append(copy.deepcopy(value))
             original_write(path, value)
         def infer(spec, path, runtime):
             calls.append(path.name)
+            if '-context-' in path.name:
+                loading = read_json(request.parent/'status.json')
+                recovery_states.append((loading['state'], loading['phase']))
             return {'status':'ok', 'text':'वो जब था '*5 if path.name == 'microphone-0.wav'
                     else self.recovery_text}
         def wait(delay):
@@ -641,6 +668,8 @@ class LocalWorkerTests(unittest.TestCase):
         self.assertEqual(result['state'], 'complete', result.get('error'))
         self.assertEqual(result['cursors']['microphone'], 30)
         self.assertEqual(sum('-context-' in name for name in calls), 1)
+        self.assertEqual(recovery_states, [('running', 'recovering_context')],
+                         'A blocked recovery call must be visible to the worker watchdog')
         self.assertEqual(read_json(request.parent/'status.json'), result)
 
     def test_canonical_result_is_durable_before_fresh_journal_read(self):

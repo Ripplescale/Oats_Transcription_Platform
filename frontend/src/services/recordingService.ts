@@ -14,6 +14,9 @@ export interface RecordingState {
   is_active: boolean;
   recording_duration: number | null;
   active_duration: number | null;
+  is_stopping?: boolean;
+  last_error?: string | null;
+  can_restart_after_capture_failure?: boolean;
 }
 
 export interface RecordingStoppedPayload {
@@ -26,6 +29,14 @@ export interface RecordingStoppedPayload {
 // Windows device enumeration, but still finite so a hung native start settles
 // the UI into ERROR instead of an eternal STARTING spinner.
 const START_TIMEOUT_MS = 120000;
+const STOP_TIMEOUT_MS = 25000;
+
+export function withStopTimeout<T>(promise: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Audio is still finishing. You can retry Finish; a new recording will be available when the audio device is released.')), STOP_TIMEOUT_MS);
+    promise.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
+  });
+}
 
 // ponytail: on timeout we only reject — no auto stop_recording. Calling stop
 // against a stuck start could itself block; the ERROR state lets the user
@@ -105,9 +116,9 @@ export class RecordingService {
    * @returns Promise<void>
    */
   async stopRecording(savePath: string): Promise<void> {
-    return invoke('stop_recording', {
+    return withStopTimeout(invoke('stop_recording', {
       args: { save_path: savePath }
-    });
+    }));
   }
 
   /**
@@ -155,6 +166,14 @@ export class RecordingService {
     return listen<RecordingStoppedPayload>('recording-stopped', (event) => {
       callback(event.payload);
     });
+  }
+
+  async onRecordingStateChanged(callback: (state: RecordingState) => void): Promise<UnlistenFn> {
+    return listen<RecordingState>('recording-state-changed', event => callback(event.payload));
+  }
+
+  async onRecordingError(callback: (message: string) => void): Promise<UnlistenFn> {
+    return listen<string>('recording-error', event => callback(event.payload));
   }
 
   /**

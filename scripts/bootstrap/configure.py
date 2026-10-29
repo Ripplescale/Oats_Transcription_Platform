@@ -12,6 +12,7 @@ import stat
 import sys
 import tempfile
 import venv
+import wave
 
 
 def read(path):
@@ -58,10 +59,10 @@ def private_environment(bundle):
     return env
 
 
-def isolated(python, arguments, cwd):
+def isolated(python, arguments, cwd, timeout=600):
     env = private_environment(cwd)
     completed = subprocess.run([str(python), "-I", "-B", *arguments], cwd=cwd, env=env,
-                               capture_output=True, text=True, timeout=600,
+                               capture_output=True, text=True, timeout=timeout,
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if completed.returncode:
         raise RuntimeError("Packaged Python check failed: " + completed.stderr[-1600:])
@@ -138,6 +139,53 @@ def prepare(bundle, device):
     return config
 
 
+def smoke(bundle):
+    """Actually run both packaged engines on disposable synthetic audio offline."""
+    candidate = bundle / "candidate-runtime.json"
+    config = read(candidate)
+    report_path = bundle / "speech-check.json"
+    failure_path = bundle / "speech-check-failure.json"
+    for owned_report in (report_path, failure_path):
+        if owned_report.exists():
+            owned_report.unlink()
+    cache = bundle / "cache"
+    cache.mkdir(exist_ok=True)
+    results = {}
+    with tempfile.TemporaryDirectory(prefix=".oats-speech-check-", dir=cache) as temporary:
+        audio = Path(temporary) / "check.wav"
+        with wave.open(str(audio), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(16000)
+            output.writeframes(b"\0\0" * 32000)
+        for model in ("apex", "trelis"):
+            code = (
+                "import sys,json;from pathlib import Path;sys.path.insert(0," + repr(str(bundle / "worker")) + ");"
+                "from sttbench.runtime.api import transcribe;"
+                "c=json.load(open(" + repr(str(candidate)) + ",encoding='utf-8'));"
+                "r=json.load(open(c['registry_path'],encoding='utf-8'));"
+                "name=" + repr(model) + ";m=next(m for m in r['models'] if m['id']==name);"
+                "options={**c['models'][name],'max_new_tokens':8,'num_beams':1,'timeout_seconds':90,'timestamps':False};"
+                "result=transcribe({**m,**c['models'][name]},Path(" + repr(str(audio)) + "),options);"
+                "print(json.dumps({'status':result['status'],'error':result.get('error'),'device':options.get('device'),'timing':result.get('timing')}))"
+            )
+            try:
+                result = json.loads(isolated(bundle / "env/Scripts/python.exe", ["-c", code], bundle, timeout=300).strip().splitlines()[-1])
+            except (subprocess.TimeoutExpired, RuntimeError, ValueError, IndexError) as error:
+                write_new(failure_path, {"model": model, "device": config["models"]["trelis"]["device"], "error": str(error)})
+                raise RuntimeError(f"{model.title()} could not complete its speech test on this PC: {error}") from error
+            results[model] = result
+            if result.get("status") != "ok":
+                detail = result.get("error") or "No successful inference result"
+                write_new(failure_path, {"model": model, "device": config["models"]["trelis"]["device"], "error": detail})
+                raise RuntimeError(f"{model.title()} speech test failed: {detail}")
+    report = {"passed": True, "candidate_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+              "device": config["models"]["trelis"]["device"], "models": results,
+              "scope": "synthetic audio inference; microphone and speech accuracy not tested"}
+    write_new(report_path, report)
+    return report
+
+
 def ensure_working_directories(config, bundle):
     """Provision transient outputs, not model assets or existing checkpoints."""
     paths = []
@@ -172,6 +220,10 @@ def activate(bundle, root):
     if (root / "runtime.json").exists() or (root / "dictation-runtime.json").exists():
         raise ValueError("Existing speech configuration was preserved")
     candidate = read(bundle / "candidate-runtime.json")
+    report = read(bundle / "speech-check.json")
+    digest = hashlib.sha256((bundle / "candidate-runtime.json").read_bytes()).hexdigest()
+    if report.get("passed") is not True or report.get("candidate_sha256") != digest:
+        raise ValueError("Run the speech check for this configuration before finishing setup")
     for key in ("python_executable", "worker_script", "registry_path"):
         path = Path(candidate[key]).resolve(strict=True)
         if not path.is_file() or not path.is_relative_to(bundle):
@@ -188,6 +240,7 @@ def main():
     action.add_argument("--probe", action="store_true")
     action.add_argument("--prepare", action="store_true")
     action.add_argument("--activate", action="store_true")
+    action.add_argument("--smoke", action="store_true")
     parser.add_argument("--device", choices=("GPU", "CPU"))
     args = parser.parse_args()
     bundle = Path(__file__).resolve().parent.parent
@@ -196,7 +249,7 @@ def main():
         raise ValueError("Install this package inside the selected data root")
     if root.is_symlink() or bundle.is_symlink():
         raise ValueError("Linked setup locations are not supported")
-    result = probe(bundle) if args.probe else prepare(bundle, args.device) if args.prepare else activate(bundle, root)
+    result = probe(bundle) if args.probe else prepare(bundle, args.device) if args.prepare else smoke(bundle) if args.smoke else activate(bundle, root)
     print(json.dumps(result, ensure_ascii=False))
 
 

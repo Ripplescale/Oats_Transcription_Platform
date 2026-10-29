@@ -32,8 +32,10 @@ public static class CoreChecks {
         using (HttpClient client = new HttpClient(handler)) {
             string path = Path.Combine(folder, a.name);
             File.WriteAllBytes(path + ".partial", data.Take(8).ToArray());
+            Check(PackageCore.RemainingDownloadBytes(new[]{a},folder)==data.Length-8,"space estimate credits resumable bytes");
             PackageCore.Download(a, folder, client, x=>{}, CancellationToken.None).GetAwaiter().GetResult();
             Check(handler.range == 8 && PackageCore.Verified(path,a), "range resumed and verified");
+            Check(PackageCore.RemainingDownloadBytes(new[]{a},folder)==0,"verified download needs no second allocation");
             PackageCore.Download(a, folder, client, x=>{}, CancellationToken.None).GetAwaiter().GetResult();
             Check(handler.calls == 1, "offline completed cache makes zero requests");
             try { PackageCore.Download(a,folder,client,x=>{},new CancellationToken(true)).GetAwaiter().GetResult(); throw new Exception("Cancelled cache check continued"); }
@@ -45,6 +47,7 @@ public static class CoreChecks {
             Reject(()=>PackageCore.Download(a,folder,client,x=>{},CancellationToken.None).GetAwaiter().GetResult(),"changed download hash");
             Check(!File.Exists(path) && !File.Exists(path+".partial"),"failed hash is never published");
             File.WriteAllText(path,"keep damaged completed file");
+            Reject(()=>PackageCore.RemainingDownloadBytes(new[]{a},folder),"damaged completed download during preflight");
             Reject(()=>PackageCore.Download(a,folder,client,x=>{},CancellationToken.None).GetAwaiter().GetResult(),"changed completed file");
             Check(File.ReadAllText(path)=="keep damaged completed file","existing content preserved");
         }
@@ -63,6 +66,14 @@ public static class CoreChecks {
         Downloads(folder);
         Archives(folder);
         WorkingDirectories(folder);
+        InstallerOverlay(folder);
+        byte[] helper=Encoding.UTF8.GetBytes("print('fixture')");
+        string helperPath=PackageCore.PublishConfigureHelper(folder,helper);
+        Check(File.ReadAllBytes(helperPath).SequenceEqual(helper),"helper publishes complete verified content");
+        Check(PackageCore.PublishConfigureHelper(folder,helper)==helperPath,"helper retries reuse exact content");
+        Check(Directory.GetFiles(Path.GetDirectoryName(helperPath),"*.tmp").Length==0,"helper publication leaves no temporary files");
+        File.WriteAllText(helperPath,"preserve mismatch");
+        Reject(()=>PackageCore.PublishConfigureHelper(folder,helper),"conflicting helper preserved");
         Bundle b=new Bundle {schema=1,id=new string('a',20),payload_id=new string('b',20),app_version="0.8.8",installed_bytes=1,payload_manifest_sha256=new string('0',64),parts=new[]{new Asset {name="oats-runtime-"+new string('b',20)+".zip.part001",url="https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-"+new string('b',20)+"/oats-runtime-"+new string('b',20)+".zip.part001",size=1,sha256=new string('0',64)}}};
         PackageCore.Validate(b); checks++;
         b.parts[0].url="https://example.com/part"; Reject(()=>PackageCore.Validate(b),"non-GitHub linked payload");
@@ -89,6 +100,32 @@ public static class CoreChecks {
         Reject(()=>RuntimeDirectories.Ensure(blocked),"conflicting work-directory file");
         Check(!Directory.Exists(Path.Combine(blocked,@"cache\openvino")) && File.ReadAllText(Path.Combine(blocked,@"cache\apex"))=="preserve conflicting file","repair checks both paths before writing");
     }
+    static void InstallerOverlay(string folder) {
+        byte[] bytes = Encoding.UTF8.GetBytes("MZ synthetic signed-app fixture; never execute");
+        Bundle bundle = new Bundle { app_version="0.8.10", app_installer_bytes=bytes.Length, app_installer_sha256=Sha(bytes) };
+        string package=Path.Combine(folder,"overlay"); Directory.CreateDirectory(Path.Combine(package,"setup"));
+        string legacy=Path.Combine(package,"setup","oats.exe"); File.WriteAllText(legacy,"immutable archived0.8.8");
+        string installed;
+        using (MemoryStream input=new MemoryStream(bytes)) installed=PackageCore.PublishAppInstaller(bundle,input,package);
+        Check(File.ReadAllBytes(installed).SequenceEqual(bytes),"current embedded installer is hash-checked and published");
+        Check(File.ReadAllText(legacy)=="immutable archived0.8.8" && installed!=legacy,"legacy archive installer is preserved and unused");
+        using (MemoryStream input=new MemoryStream(bytes)) Check(PackageCore.PublishAppInstaller(bundle,input,package)==installed,"matching overlay supports retry without replacement");
+        File.WriteAllText(installed,"preserve conflicting current installer");
+        Reject(()=>PackageCore.PublishAppInstaller(bundle,new MemoryStream(bytes),package),"conflicting installer overlay");
+        Check(File.ReadAllText(installed)=="preserve conflicting current installer","conflicting executable preserved");
+        string bad=Path.Combine(folder,"bad-overlay");
+        Reject(()=>PackageCore.PublishAppInstaller(bundle,new MemoryStream(Encoding.UTF8.GetBytes("MZ changed")),bad),"truncated embedded installer");
+        Check(Directory.GetFiles(Path.Combine(bad,"setup")).Length==0,"failed installer leaves no executable or temporary file");
+        byte[] changed=(byte[])bytes.Clone(); changed[changed.Length-1]^=1;
+        Reject(()=>PackageCore.PublishAppInstaller(bundle,new MemoryStream(changed),bad),"tampered same-size installer");
+        byte[] oversized=bytes.Concat(new byte[]{0}).ToArray();
+        Reject(()=>PackageCore.PublishAppInstaller(bundle,new MemoryStream(oversized),bad),"oversized resource");
+        bundle.app_installer_bytes=PackageCore.MaxInstaller+1;
+        Reject(()=>PackageCore.ValidateAppInstaller(bundle),"installer above512MiB bound");
+        bundle.app_installer_bytes=bytes.Length; bundle.app_installer_sha256="invalid";
+        Reject(()=>PackageCore.ValidateAppInstaller(bundle),"invalid app installer digest");
+        Reject(()=>PackageCore.ValidateAppInstaller(new Bundle {app_version="0.8.10"}),"missing current app installer");
+    }
     static void Archives(string folder) {
         byte[] data=Encoding.UTF8.GetBytes("verified fixture content");
         Payload payload=new Payload {schema=1, files=new[]{new PayloadFile {path="setup/fixture.txt",size=data.Length,sha256=Sha(data)}}};
@@ -103,7 +140,9 @@ public static class CoreChecks {
             using(ZipArchive zip=new ZipArchive(bytes,ZipArchiveMode.Read,true)) {
                 Payload verified=PackageCore.ReadPayload(zip,b);
                 string target=Path.Combine(folder,"archive");
+                Check(PackageCore.RemainingExtractionBytes(verified,target)==data.Length,"fresh extraction space");
                 PackageCore.Extract(zip,verified,target,x=>{},CancellationToken.None);
+                Check(PackageCore.RemainingExtractionBytes(verified,target)==0,"verified extracted content needs no second allocation");
                 Check(File.ReadAllBytes(Path.Combine(target,"setup/fixture.txt")).SequenceEqual(data),"archive hashes checked while extracting");
                 PackageCore.Extract(zip,verified,target,x=>{},CancellationToken.None);
                 checks++;
@@ -111,6 +150,7 @@ public static class CoreChecks {
                 PackageCore.Extract(zip,verified,longer,x=>{},CancellationToken.None);
                 Check(File.ReadAllBytes(PackageCore.LongPath(Path.Combine(longer,"setup/fixture.txt"))).SequenceEqual(data),"extraction supports paths longer than MAX_PATH");
                 File.WriteAllText(Path.Combine(target,"setup/fixture.txt"),"preserve existing");
+                Reject(()=>PackageCore.RemainingExtractionBytes(verified,target),"changed extracted content during preflight");
                 Reject(()=>PackageCore.Extract(zip,verified,target,x=>{},CancellationToken.None),"changed extracted file");
                 Check(File.ReadAllText(Path.Combine(target,"setup/fixture.txt"))=="preserve existing","extracted content preserved");
                 b.payload_manifest_sha256=new string('0',64);

@@ -263,8 +263,12 @@ impl RecordingManager {
         }
 
         // Start device monitoring to detect disconnects
+        self.recording_saver.set_device_info(
+            self.state.get_microphone_device().as_ref().map(|device|device.name.clone()),
+            self.state.get_system_device().as_ref().map(|device|device.name.clone()),
+        );
         if let Some(ref mut monitor) = self.device_monitor {
-            if let Err(e) = monitor.start_monitoring(microphone_device, system_device) {
+            if let Err(e) = monitor.start_monitoring(self.state.get_microphone_device(), self.state.get_system_device()) {
                 warn!("Failed to start device monitoring: {}", e);
                 // Non-fatal - continue without monitoring
             } else {
@@ -299,12 +303,19 @@ impl RecordingManager {
         });
         // Source draining already runs independently if a device driver's
         // synchronous CPAL teardown is slow after a headset disconnect.
-        let stream_result = self.stream_manager.stop_streams();
+        let mut streams = std::mem::replace(&mut self.stream_manager, AudioStreamManager::new(self.state.clone()));
+        let stream_shutdown = tokio::task::spawn_blocking(move || streams.stop_streams());
+        let mut source_result = Ok(());
         if let Some(finalization) = finalization {
-            let (recorder, result) = finalization.await.map_err(|e| anyhow::anyhow!("Capture finalization task failed: {e}"))?;
-            self.durable_recorder = Some(recorder);
-            result?;
+            match finalization.await {
+                Ok((recorder, result)) => { self.durable_recorder = Some(recorder); source_result = result.map(|_| ()); }
+                Err(error) => { source_result = Err(anyhow::anyhow!("Capture finalization task failed: {error}")); }
+            }
         }
+        // Never release the recording quarantine until BOTH owned tasks finish,
+        // including when source verification fails first.
+        let stream_result = stream_shutdown.await.map_err(|e|anyhow::anyhow!("Audio device shutdown failed: {e}"))?;
+        source_result?;
         stream_result?;
         Ok(())
     }

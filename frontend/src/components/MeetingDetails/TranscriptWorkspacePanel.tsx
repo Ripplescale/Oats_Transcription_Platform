@@ -51,7 +51,8 @@ export function TranscriptWorkspacePanel({ meeting, review, hasMore, isLoadingMo
   const pendingFinal = activeRole === 'final' && !meeting.transcripts.length && (run?.job?.state ?? activeLayer?.state) !== 'complete' && !needsAttention;
   const processing = run?.job && !isTerminalJob(run.job.state);
   const liveState = run?.job?.state ?? activeLayer?.state;
-  const liveTitle = liveState === 'complete' ? 'Final transcript' : !run?.recording && !isTerminalJob(liveState ?? 'queued') && !!run?.captureEnded ? 'Finishing transcript' : 'Live transcript';
+  const waitingForRecordedTranscript = !!run?.recording && run.preferences.timing === 'after-recording';
+  const liveTitle = liveState === 'complete' ? 'Final transcript' : waitingForRecordedTranscript ? 'Queued transcript' : !run?.recording && !isTerminalJob(liveState ?? 'queued') && !!run?.captureEnded ? 'Finishing transcript' : 'Live transcript';
   const internalAudio = useRef<HTMLAudioElement>(null);
   const audio = playback?.audio ?? internalAudio;
   const playablePath = playback ? playback.path : audioPath;
@@ -77,6 +78,7 @@ export function TranscriptWorkspacePanel({ meeting, review, hasMore, isLoadingMo
     if (layer.workflow_role === 'fallback') return 'Apex fallback';
     if (layer.workflow_role === 'live-final') {
       const layerRun = state.runs.find(item => item.job?.job_id === layer.job_id);
+      if (layerRun?.recording && layerRun.preferences.timing === 'after-recording') return 'Queued transcript';
       return layer.state === 'complete' ? 'Final transcript' : layerRun?.captureEnded && !isTerminalJob(layer.state) ? 'Finishing transcript' : 'Live transcript';
     }
     if (layer.workflow_role === 'live-draft') return 'Live draft';
@@ -191,6 +193,7 @@ export function TranscriptWorkspacePanel({ meeting, review, hasMore, isLoadingMo
         {layers.map(layer => <button type="button" key={layer.meeting_id} aria-current={layer.meeting_id === meeting.id ? 'page' : undefined} className={`shrink-0 rounded-md px-3 py-1.5 text-xs transition-colors ${layer.meeting_id === meeting.id ? 'bg-[var(--xx-canvas)] font-medium text-[var(--xx-accent)]' : 'text-[var(--xx-muted)] hover:bg-[var(--xx-canvas)]'}`} onClick={() => openLayer(layer.meeting_id)}>{layerName(layer)}{['queued', 'not_started'].includes(layer.state) ? ' · pending' : !isTerminalJob(layer.state) ? ' · processing' : layer.state === 'failed' || layer.state === 'stopped' ? ' · needs attention' : ''}</button>)}
       </nav>}
       {isDev && activeRole === 'live-draft' && <p className="text-[11px] leading-4 text-[var(--xx-muted)]">Apex live draft, kept separately from the Trelis final transcript and its corrections.</p>}
+      {waitingForRecordedTranscript && <p role="status" className="px-4 py-2 text-xs text-[var(--xx-muted)]">Transcription starts after you finish recording on this computer.</p>}
       {isDev && activeRole === 'fallback' && <p className="text-[11px] leading-4 text-[var(--xx-muted)]">Apex fallback. This version keeps its own notes and corrections; the Trelis transcript is still available.</p>}
       {isDev && activeRole === 'live-final' && <p className="text-[11px] leading-4 text-[var(--xx-muted)]">Trelis keeps the original Hindi + English script. Raw recognition and your corrections are saved separately.</p>}
       {layerError && <p className="text-xs text-amber-800" title={layerError}>Other transcript versions could not be loaded. Your current transcript is still available.</p>}

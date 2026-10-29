@@ -5,7 +5,7 @@ import io
 from pathlib import Path
 import zipfile
 
-from build_bundle import archive, compile_setup, digest, embed_msvc, read, runtime_file
+from build_bundle import archive, compile_setup, digest, embed_msvc, read, runtime_file, add_installer_arguments, verify_app_installer
 
 
 class JoinedReader(io.RawIOBase):
@@ -67,7 +67,9 @@ def main():
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--inputs", type=Path, required=True)
+    add_installer_arguments(parser)
     args = parser.parse_args()
+    verify_app_installer(args.app_installer, args.update_feed, args.public_key, args.node)
     original = read(args.source / "bundle.json")
     paths = [args.source / part["name"] for part in original["parts"]]
     for path, part in zip(paths, original["parts"]):
@@ -86,7 +88,8 @@ def main():
         sources = {f["path"]: ZipSource(zipped, f) for f in files if runtime_file(f["path"])}
         result = archive(sources, target, original["id"])
     embed_msvc(result, target, args.inputs)
-    compile_setup(result, target)
+    compile_setup(result, target, app_installer=args.app_installer, update_feed=args.update_feed,
+                  public_key=args.public_key, node=args.node)
     print(json.dumps({"id": result["id"], "files": len(sources), "removed_build_files": len(files) - len(sources), "installed_bytes": result["installed_bytes"], "download_bytes": sum(p["size"] for p in result["parts"])}), flush=True)
 
 

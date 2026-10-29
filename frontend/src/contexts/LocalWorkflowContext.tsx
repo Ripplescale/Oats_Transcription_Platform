@@ -57,6 +57,7 @@ export function LocalWorkflowProvider({ children }: { children: React.ReactNode 
         const saved = localStorage.getItem(STORAGE_KEY);
         if (saved) { const parsed = JSON.parse(saved) as Partial<WorkflowState>; workflow.state = { ...workflow.state, ...parsed, runs: Array.isArray(parsed.runs) ? parsed.runs : [] }; workflow.setPreferences(workflow.state.preferences); }
       } catch { localStorage.removeItem(STORAGE_KEY); }
+      await workflow.prepareProfiles();
       const attach = async <T,>(eventName: string, callback: (payload: T) => void) => {
         const off = await listen<T>(eventName, event => { if (alive) callback(event.payload); });
         if (alive) unlisteners.push(off); else off();
@@ -64,6 +65,13 @@ export function LocalWorkflowProvider({ children }: { children: React.ReactNode 
       try {
         await attach<{ capture?: CaptureSession }>('recording-started', payload => { if (payload.capture) void workflow.captureStarted(payload.capture); });
         await attach<{ capture?: CaptureSession }>('recording-stopped', payload => { if (payload.capture) void workflow.captureStopped(payload.capture); });
+        await attach<{ capture?: CaptureSession; error?: string }>('recording-interrupted', payload => {
+          if (payload.capture) void workflow.captureInterrupted(payload.capture, payload.error ?? 'Audio capture stopped unexpectedly.');
+          callbacks.current.setIsMeetingActive(false);
+          callbacks.current.setStatus(RecordingStatus.ERROR);
+          window.dispatchEvent(new Event('xx-capture-interrupted'));
+          toast.warning('Recording interrupted. Saved audio needs recovery.', { description: payload.error });
+        });
         const active = await invoke<CaptureSession | null>('get_active_capture');
         if (alive) await workflow.refreshAfterReload(active);
       } catch (error) { if (alive) toast.error('Could not connect the local workflow', { description: String(error) }); }

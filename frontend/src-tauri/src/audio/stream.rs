@@ -401,7 +401,10 @@ impl AudioStreamManager {
                 }
                 Err(e) => {
                     error!("❌ Failed to create microphone stream: {}", e);
-                    return Err(e);
+                    self.state.capture_event("device_unavailable", serde_json::json!({"track":"microphone","error":e.to_string()}));
+                    self.state.report_error(super::recording_state::AudioError::DeviceDisconnected);
+                    // A failed/denied microphone must not prevent independent
+                    // computer audio. The shared guard below rejects zero streams.
                 }
             }
         } else {
