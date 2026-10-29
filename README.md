@@ -6,7 +6,7 @@ oats is a local Windows desktop app for recording calls, keeping the audio, and 
 
 ## Get started
 
-Download **[Oats-Setup.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4dd/Oats-Setup.exe)**, open it on the PC where you want oats, and click **Install oats** (older copies say **Download and install**). Setup downloads everything needed. When it finishes, open **oats** from the Windows Start menu and check **About → Check for updates**.
+Download **[Oats-Setup.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4de/Oats-Setup.exe)**, open it on the PC where you want oats, and click **Install oats** (older copies say **Download and install**). Setup downloads everything needed. When it finishes, open **oats** from the Windows Start menu and check **About → Check for updates**.
 
 The first download is about **11 GB**; keep **30 GB free**. No Python, terminal commands or accounts are needed. See the **[short installation guide](docs/COMPLETE_SETUP.md)**. Only use **Download for another PC** (older wording: **Save for offline setup**) if you need to transfer setup to a PC without internet.
 
