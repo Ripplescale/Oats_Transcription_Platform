@@ -1,0 +1,25 @@
+name: Check Windows installer migration
+on:
+  pull_request:
+    paths:
+      - 'frontend/src-tauri/scripts/**'
+      - 'scripts/check-installer-migration.ps1'
+      - '.github/workflows/oats-installer-migration.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-installer-fixtures:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Provision NSIS
+        shell: pwsh
+        run: |
+          choco install nsis --version=3.11 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS provisioning failed.' }
+      - name: Exercise native installer with isolated PE, registry and shortcut fixtures
+        shell: pwsh
+        run: |
+          ./scripts/check-installer-migration.ps1 -OutputDirectory $env:RUNNER_TEMP -NsisCompiler "${env:ProgramFiles(x86)}/NSIS/makensis.exe"
