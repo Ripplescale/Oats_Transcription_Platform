@@ -84,6 +84,8 @@ Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
 
+!include "${OATS_MIGRATION_INCLUDE}"
+
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
 OutFile "${OUTFILE}"
@@ -912,9 +914,7 @@ Section Uninstall
 SectionEnd
 
 Function RestorePreviousInstallLocation
-  ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
-  StrCmp $4 "" +2 0
-    StrCpy $INSTDIR $4
+  Call OatsDiscoverInstallation
 FunctionEnd
 
 Function Skip

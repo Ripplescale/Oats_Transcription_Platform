@@ -1,3 +1,5 @@
+!define OATS_MIGRATION_INCLUDE "${__FILEDIR__}\oats-install-migration.nsh"
+
 ; Preserve only the existing data-location pointer, never notes, runtime files or
 ; models. PREINSTALL is too late for manual upgrades: the reinstall page may run
 ; the old uninstaller first. Our template calls this in .onInit and again before
@@ -45,6 +47,12 @@
 ; Rename or remove only old shortcuts that point to this installation.
 !macro NSIS_HOOK_POSTINSTALL
   ${If} $NoShortcutMode <> 1
+    Call OatsRepairShortcuts
+    ${If} $OatsRepairFailed = 1
+      MessageBox MB_OK|MB_ICONSTOP "oats was installed, but a shortcut could not be repaired. Open $INSTDIR\${MAINBINARYNAME}.exe directly and retry setup to repair the shortcut. No separate installation was deleted." /SD IDOK
+      SetErrorLevel 2
+      Abort
+    ${EndIf}
     !insertmacro IsShortcutTarget "$SMPROGRAMS\xx.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
     Pop $0
     ${If} $0 = 1

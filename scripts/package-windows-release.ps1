@@ -115,6 +115,7 @@ try {
     $signingConfig = @{ plugins = @{ updater = @{ pubkey = $publicKey; requireSignedVersion = $true } } } | ConvertTo-Json -Depth 5 -Compress
     & $node $cli build --target x86_64-pc-windows-msvc --bundles nsis --config $signingConfig -- --locked -j 1
     if ($LASTEXITCODE -ne 0) { throw 'Signed Windows release build failed.' }
+    & (Join-Path $sourceRoot 'scripts/check-installer-migration.ps1') -OutputDirectory $StageRoot -NsisCompiler (Join-Path $env:LOCALAPPDATA 'tauri/NSIS/makensis.exe')
     $asset = "oats_${Version}_x64-setup.exe"
     $bundle = Join-Path $env:CARGO_TARGET_DIR "x86_64-pc-windows-msvc\release\bundle\nsis\$asset"
     Copy-Item -LiteralPath $bundle -Destination (Join-Path $OutputDirectory $asset)
