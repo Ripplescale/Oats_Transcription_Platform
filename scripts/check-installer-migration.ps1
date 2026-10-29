@@ -22,9 +22,10 @@ $output=Join-Path $directory 'native-installer-checks.exe'
 if($LASTEXITCODE -ne 0){throw 'NSIS migration fixture harness did not compile'}
 if($CompileOnly){Write-Output 'Native installer fixture harness compiled. No test executable was run.';return}
 $results=Join-Path $env:TEMP ('oats-native-fixtures-'+$id)
-& $output /S
-if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $results 'passed.txt'))){
+$process=Start-Process -FilePath $output -ArgumentList '/S' -PassThru -WindowStyle Hidden
+if(-not $process.WaitForExit(120000)){$process.Kill();throw 'Native fixture process timed out'}
+if($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $results 'passed.txt'))){
     if(Test-Path -LiteralPath (Join-Path $results 'failed.txt')){Get-Content -LiteralPath (Join-Path $results 'failed.txt')}
-    throw ('Native installer migration fixtures failed. Inspect '+$results)
+    throw ('Native installer migration fixtures failed, exit '+$process.ExitCode+'. Inspect '+$results)
 }
 Get-Content -LiteralPath (Join-Path $results 'passed.txt')
