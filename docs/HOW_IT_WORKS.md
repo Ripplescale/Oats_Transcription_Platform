@@ -6,8 +6,8 @@ oats keeps audio as the source of truth and treats transcripts as editable inter
 
 1. **Open a new note.** Choose a project on the home screen, then click New note. This action starts microphone and system-audio capture and opens the writing canvas. Tracks are written independently with a session manifest and timing journal. Capture does not depend on a model loading successfully. Recording options remain available in the bottom bar.
 2. **Save before inference.** The worker builds bounded mono windows from saved audio on the session clock. Gaps and interruptions remain visible. Original tracks stay available for recovery.
-3. **Write while oats listens.** Notes autosave independently. Open the transcript with the microphone/up-arrow control when you want to check it. Computer audio appears in chat bubbles on the left and microphone audio on the right, in the existing transcript order. These labels identify recording sources, not individual speakers; older text without a known source stays neutral. Choose Trelis windows of 5, 10, or 20 seconds; new settings default to 10 seconds. Whole quiet microphone windows are omitted before speech detection and inference, as described below. A conservative Silero gate checks retained Trelis windows and retains uncertain speech. Trelis preserves the original Hindi/English script, with a small set of unambiguous hesitation fillers displayed in Roman script.
-4. **Stop and finish remaining audio.** Stopping capture lets the same Trelis job drain its backlog and process the final partial window. The display changes from Live transcript to Finishing transcript, then Final transcript on completion. There is no second full pass. “Final” means processing finished, not human verification.
+3. **Write while oats listens.** Notes autosave independently. Open the transcript with the microphone/up-arrow control when you want to check it. A compatible OpenVINO GPU supports transcription during recording; a CPU Trelis runtime waits until you finish or recover the recording. Computer audio appears in chat bubbles on the left and microphone audio on the right, in the existing transcript order. These labels identify recording sources, not individual speakers; older text without a known source stays neutral. Choose Trelis windows of 5, 10, or 20 seconds; new settings default to 10 seconds. Whole quiet microphone windows are omitted before speech detection and inference, as described below. A conservative Silero gate checks retained Trelis windows and retains uncertain speech. Trelis preserves the original Hindi/English script, with a small set of unambiguous hesitation fillers displayed in Roman script.
+4. **Stop and finish remaining audio.** In live GPU mode, stopping capture lets the same Trelis job drain its backlog and process the final partial window; there is no second full pass. CPU or deferred mode starts Trelis on the saved recording after capture finishes. The display changes to Final transcript on completion. “Final” means processing finished, not human verification.
 5. **Recover suspicious output.** Long repeated phrases or a reached generation limit trigger a retry using a neighborhood of up to 30 seconds. While recording, the app waits for the needed following audio and keeps the original text visible as provisional. A clean, nonempty retry replaces its covered range. Any untouched part of a neighboring window is transcribed separately, so the replacement neither duplicates that range nor guesses which words to trim. If that cannot be completed reliably, the app retries the original window in pieces of at most 5 seconds. A completed, nonempty combined fallback becomes the displayed and copied text even if repetition remains. Failed or entirely empty fallbacks retain the original. Every recovery remains marked for review, with originals and attempts preserved.
 6. **Review speakers.** Optional Community-1 runs after that recording and its transcription complete. Speaker labeling for a finished call can continue while Trelis transcribes your next call. Turns are mapped to transcript windows, overlapping candidates remain explicit, and manual names survive reconciliation. Live individual speaker identification remains future work.
 7. **Keep notes or hand off.** Review the transcript, edit text, name speakers, add notes, and play the related audio. Trelis remains the primary version; an explicitly requested Apex fallback has its own notes and corrections. Export or hand the selected version to Claude yourself.
@@ -15,8 +15,8 @@ oats keeps audio as the source of truth and treats transcripts as editable inter
 ```mermaid
 flowchart LR
     A[Microphone and system audio] --> B[Saved tracks and timing journal]
-    B --> C[Trelis live transcript]
-    C --> D[Stop: same job finishes remaining audio]
+    B --> C["Trelis transcript: GPU during capture; CPU after Finish"]
+    C --> D[Finish any remaining saved audio]
     D --> E[Completed Trelis transcript]
     C --> H[User chooses Apex fallback]
     H --> I[Pause Trelis and retain its checkpoint]
@@ -71,7 +71,7 @@ The app can also offer a shorter retry when there is substantial audio but surpr
 
 | Profile | Execution | Output | Current role |
 | --- | --- | --- | --- |
-| Trelis · 5, 10, or 20 seconds | Pinned OpenVINO GPU FP16 environment and verified stateful export | Devanagari and English | Default live transcript; new settings use 10 seconds; same job finishes after stopping |
+| Trelis · 5, 10, or 20 seconds | OpenVINO GPU FP16 environment and verified stateful export, or a configured CPU runtime | Devanagari and English | GPU can update during recording; CPU starts after stopping; new settings use 10 seconds |
 | Apex · 20 seconds | Pinned whisper.cpp CLI, Q5_0 conversion, Vulkan on the tested machine | Roman Hinglish | Explicit fallback in a separate version |
 
 The adapter preserves Trelis's custom mixed-code prefix, greedy decoding, 440-token generation limit, and original script. The FP16 export retains the original tokenizer and vocabulary; no INT8 conversion or transliteration is used. The GPU is selected explicitly, and a GPU failure is visible rather than silently changing to CPU. Apex uses its documented English/transcribe decoding profile for Roman output. Exact model revisions are in [`models.json`](../stt_lab/models.json); local configurations record paths and runtime settings.
@@ -111,7 +111,7 @@ Chunk boundaries and decoding can affect omissions and repetition. Language bias
 
 ## Handoff, queueing, and recovery
 
-One transcription worker and one speaker worker can run together. Stopping capture normally leaves Trelis running until the saved audio is finished. Pausing transcription or choosing Apex fallback is a separate graceful request: the current inference must finish, its output must be saved/imported, and the process must exit before another worker of the same type takes its slot. A saved terminal checkpoint alone does not prove that model teardown is finished.
+One transcription worker and one speaker worker can run together. In live GPU mode, stopping capture leaves Trelis running until the saved audio is finished. In CPU or deferred mode, capture finishes before the Trelis job starts. Pausing transcription or choosing Apex fallback is a separate graceful request: the current inference must finish, its output must be saved/imported, and the process must exit before another worker of the same type takes its slot. A saved terminal checkpoint alone does not prove that model teardown is finished.
 
 When calls happen back-to-back, capture continues even if an earlier worker is busy. Trelis starts when the slot is available and uses the saved recording, even if the call has already ended. This keeps recording independent of inference without claiming immediate live updates for every queued call.
 
@@ -154,7 +154,7 @@ A first meeting-preparation view can show the latest linked notes and transcript
 | `runtime/`, `lab/` | Worker source, Python environments, models and tools |
 | `runtime.json`, `speaker-runtime.json` | Local runtime configuration pointers |
 
-`STTAPP_DATA_DIR` takes precedence over the adjacent installation pointer; otherwise the Windows local directory is used. Existing configurations contain absolute paths. Moving a populated root needs migration and validation; see [setup](SETUP.md#storage-and-backups).
+`STTAPP_DATA_DIR` takes precedence over the adjacent installation pointer; otherwise the Windows local directory is used. Existing configurations contain absolute paths. Moving a populated root needs migration and validation; see the [developer setup guide](DEVELOPER_SETUP.md).
 
 ## Validation boundary
 
