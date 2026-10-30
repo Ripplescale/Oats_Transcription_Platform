@@ -48,26 +48,17 @@ Record a call and take notes, or speak into the app where you are already writin
 
 ```mermaid
 flowchart TD
-    A["Start a new note or accept a recording prompt"] --> B["Save microphone and computer audio separately"]
-    A --> N["Write notes with autosave"]
-    B --> C{"When should transcription run?"}
-    C -->|"Supported GPU and live mode"| D["Process saved windows during recording"]
-    C -->|"CPU or deferred mode"| E["Finish recording, then process saved windows"]
-    D --> P["Check for speech in saved audio windows"]
-    E --> P
-    P --> F["Trelis turns speech into text"]
-    F --> G["Retry repetition or cut-off output where needed"]
-    G --> H["Transcript updates as windows complete"]
-    H --> I["Finish any remaining saved audio"]
-    I --> J["Notes, transcript and recording in one workspace"]
-    N --> J
-    B -->|"Choose Apex fallback"| K["Replay saved audio into a separate version"]
-    K --> J
-    J --> L["Review, correct and play back"]
-    L --> M["Export or manually hand off to Claude"]
+    A["Record audio<br/>and take notes"] --> B["Save microphone<br/>and computer audio"]
+    B --> C["Trelis transcript<br/>Speech checks + retries"]
+    B -->|"Optional"| D["Apex fallback<br/>Separate version"]
+    C --> E["Review and correct<br/>Notes + audio playback"]
+    D --> E
+    E --> F["Export or send to Claude<br/>You choose what to share"]
 ```
 
-**Audio is saved before recognition.** Recording continues independently of model loading or transcription. In live mode, finishing the recording lets the same Trelis job process its remaining audio; it does not start a second full pass. Other transcription work can queue, and CPU meeting transcription waits until capture finishes.
+**Timing:** supported GPU/live mode transcribes during recording; CPU or deferred mode starts after **Finish recording**. In live mode, the same Trelis job finishes its remaining audio after capture stops; it does not start a second full pass.
+
+**Audio is saved before recognition.** Recording continues independently of model loading or transcription. Other transcription work can queue.
 
 The speech checks include a conservative speech detector and a quiet-microphone policy. Very quiet microphone speech can be omitted from the transcript, while the source audio is retained. Automatic checks and retries help with review; they do not establish that every word is correct. See the [detailed processing flow](docs/HOW_IT_WORKS.md#how-each-piece-of-audio-becomes-text).
 
