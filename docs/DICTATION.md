@@ -1,16 +1,16 @@
 # Dictation
 
-oats uses the configured local Trelis runtime for Windows dictation. Live phrase delivery was introduced in 0.8.2; 0.8.3 adds a movable indicator and remembers its position. See the versioned release notes for subsequent changes. Source availability does not imply that a particular version is installed or published.
+oats uses the configured local Trelis runtime for Windows dictation. The current packaged worker uses word agreement across successive recognition results, with pauses and Stop finishing the pending tail. Earlier versions used finalized-phrase delivery. See the versioned release notes when checking an older installation.
 
 ## Use
 
-Keep oats running, including in the tray, and focus the destination text field. Press **Ctrl+Alt+Shift+D** to start. Completed phrases appear after short pauses while recording continues. Press the shortcut again, or use **Stop**, to finish the remaining speech.
+Keep oats running, including in the tray, and focus the destination text field. Press **Ctrl+Alt+Shift+D** to start. Confirmed text is typed while recording continues, after recognition and agreement checks. Press the shortcut again, or use **Stop**, to finish the remaining speech.
 
 The **Copilot key** also toggles dictation when it emits **Win+Shift+F23** and Windows permits registration. Settings → Dictation reports registration and whether the key signal has been observed. Physical key behavior varies by device; registration alone does not prove that the key emits the expected signal.
 
 The floating indicator shows microphone activity, status, Stop and Cancel. Drag its grip to change position. Copy recovery and errors expand into a panel. Cancel stops further delivery and keeps words already typed. Capture uses the default Windows microphone and stops automatically after two minutes.
 
-This is finalized phrase streaming. Continuous speech without a qualifying pause can wait until a pause or Stop. Recognition preserves the model's mixed Hindi/English scripts; no latency or accuracy guarantee is implied.
+This is append-only streaming with a confirmation delay. Unstable words can remain pending until a later recognition result, a pause or Stop. Recognition preserves the model's mixed Hindi/English scripts; no latency or accuracy guarantee is implied.
 
 ## Delivery and focus
 
@@ -30,17 +30,17 @@ Successful requests reuse the prepared model. Ten minutes without a completed di
 
 Temporary request audio and results are removed after each response. An abrupt process termination can leave an operating-system temporary directory. Dictation creates no meeting or note.
 
-## Confirmed phrase protocol
+## Confirmed word protocol
 
-Live requests set `stream.live: true`. Cumulative audio is submitted after 2.1 seconds and every two seconds thereafter. The worker uses VAD to find finalized phrases after 600 ms of quiet, with 100 ms of padding. Each contiguous finalized phrase is decoded once. Speech still in progress stays pending; Stop processes the remainder. If VAD is unavailable, unresolved audio waits until Stop.
+The native Trelis caller sets `stream.live: true` and `stream.stable: true`, and requires the worker's `local_agreement_v1` policy. Cumulative audio is submitted at a bounded preview cadence. The decoder works on a rolling window of at most 20 seconds, rather than repeatedly decoding an ever-growing session.
 
-Cached phrase boundaries and text are immutable. Reuse requires an exact match of the normalized PCM prefix. A changed prefix cannot silently reuse earlier audio. Native validation checks stream identity, the `confirmed_phrases` marker and sample counts.
+Two distinct audio prefixes must produce matching words before unfinished speech is eligible for delivery. Two trailing words remain provisional. A detected pause can flush the tail after 600 ms of quiet with 100 ms of padding; Stop processes the final tail. If pause detection is unavailable, word agreement continues and the last words wait for Stop.
 
-The response contains cumulative confirmed text. Native delivery immediately appends only the new suffix after checking the target and input guard. Repeated responses are ignored. Any revision to already delivered text blocks further insertion and preserves the final result for Copy. There is no fuzzy reconciliation or replacement of typed words.
+When the rolling window advances, the worker requires one unique overlap with the committed text: an anchor of up to eight words, with at least three words available. Ambiguous overlap or revisions to committed words stop automatic delivery instead of guessing a replacement. The observed normalized audio prefix is validated before cache reuse. Earlier non-stable live requests retain their finalized-phrase protocol.
 
-Final text assembles confirmed phrases and the remaining audio in order. Phrase boundaries can produce different recognition from a single whole-clip decode. Successful simulated delivery must equal the normalized live final transcript; whole-clip agreement is a separate accuracy question.
+Responses contain cumulative confirmed text and a separate tentative draft. Native delivery appends only the new confirmed suffix after checking the target and input guard. Repeated responses do not type the text again. Already typed words are never selected, deleted or replaced by dictation.
 
-Earlier experimental delivery from changing partial hypotheses was rejected after revisions and decoder repetition made it unreliable. The active Trelis path uses finalized phrases. The separate [faster-whisper experiment](FASTER_WHISPER_DICTATION.md) is retired.
+If agreement breaks, finishing can produce a full-clip review result for Copy; it does not automatically reconcile that result with words already typed. Streaming and whole-clip recognition can differ. Synthetic delivery checks are separate from real-speech accuracy and destination-app acceptance. The separate [faster-whisper experiment](FASTER_WHISPER_DICTATION.md) is retired.
 
 ## Isolation and compatibility
 

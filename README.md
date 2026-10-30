@@ -1,59 +1,162 @@
 # oats
 
-**I listen and I don't judge**
+**Local meeting transcription and dictation for Hindi–English conversations.**
 
-oats is a local Windows desktop app for recording calls, keeping the audio, and working with Hindi–English transcripts. It builds on Meetily Community with a local inference worker and a notes-first workspace.
+Record a call and take notes, or speak into the app where you are already writing. oats runs speech recognition on your Windows PC and keeps your recordings, notes and transcripts locally.
 
-## Get started
+*I listen and I don't judge.*
 
-Download **[Oats-Setup.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4de/Oats-Setup.exe)**, open it on the PC where you want oats, and click **Install oats** (older copies say **Download and install**). Setup downloads everything needed. When it finishes, open **oats** from the Windows Start menu and check **About → Check for updates**.
+**[Download for Windows](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4de/Oats-Setup.exe)** · [Installation guide](docs/COMPLETE_SETUP.md) · [Releases](https://github.com/Ripplescale/Oats_Transcription_Platform/releases) · [How it works](docs/HOW_IT_WORKS.md)
 
-The first download is about **11 GB**; keep **30 GB free**. No Python, terminal commands or accounts are needed. See the **[short installation guide](docs/COMPLETE_SETUP.md)**. Only use **Download for another PC** (older wording: **Save for offline setup**) if you need to transfer setup to a PC without internet.
+![oats workspace with notes, recording playback and an expandable transcript](docs/assets/xx-workspace.png)
 
-Existing users should use the app's update notification or **About → Check for updates**. Developers building from source can use the **[developer guide](docs/DEVELOPER_SETUP.md)**. **[How it works](docs/HOW_IT_WORKS.md)** explains capture, models, revisions, retries, and storage. **[Privacy](PRIVACY_POLICY.md)** describes local processing and manual export.
+*Screenshots use fictional conversations and notes.*
 
-![oats compact notes workspace with recording playback and an expandable transcript](docs/assets/xx-workspace.png)
+**Explore:** [Transcription](#meeting-transcription) · [Dictation](#dictation-into-another-app) · [Notes and organisation](#notes-and-organisation) · [Install and update](#install-and-update)
 
-*The screenshot uses fictional conversations, names, and quantities.*
+## Two ways to use oats
+
+| | Meeting transcription | Dictation |
+| --- | --- | --- |
+| Use it for | Calls, interviews, discussions and meeting notes | Writing messages, emails and documents by speaking |
+| Audio input | Your microphone and computer audio, saved as separate tracks | Your default Windows microphone |
+| Text destination | A saved transcript alongside your notes and recording | The focused text field in another app |
+| Start | **New note**, or accept a Zoom/Teams recording prompt | **Ctrl + Alt + Shift + D**, or a supported Copilot key |
+| Model | Trelis, with an optional separate Apex fallback | Trelis |
+| What is kept | Audio, notes, transcript versions and corrections | The last result remains available in Settings; no meeting is created |
+
+## Meeting transcription
+
+### Record and take notes
+
+- **Capture both sides of a call.** Microphone and computer audio are recorded separately, with timing information for playback and recovery.
+- **Write while recording.** Notes autosave independently of transcription. You can return to Home and browse other notes while a meeting continues recording.
+- **Choose when to transcribe.** A compatible Intel GPU supports Trelis updates during recording. CPU mode prepares the Trelis transcript after you finish recording; deferred processing is also available.
+- **Choose a processing window.** Trelis supports 5, 10 or 20-second windows, with 10 seconds as the default for new settings. Loading, inference and queued work add delay beyond that window length.
+- **Start from a call prompt.** Supported Zoom and Teams desktop activity can show **Record call / Dismiss**. You decide whether to record; oats does not automatically join or record a meeting. [Detection coverage](docs/MEETING_DETECTION.md).
+
+### Review and reuse the conversation
+
+- **Read Hindi and English together.** Trelis preserves mixed Hindi/English scripts. Microphone and computer-audio bubbles identify recording sources, not individual people.
+- **Listen and correct.** Keep playback, original recognition and your corrections together. A correction does not erase the original model output.
+- **Retry saved audio.** If recognition fails, retry the saved recording without asking everyone to repeat the call. Suspicious repetition and length-limited output can trigger bounded retries using surrounding audio or shorter pieces.
+- **Compare a fallback version.** Choose **Apex fallback** to reprocess saved audio into a separate Roman Hinglish transcript. Trelis output and its corrections remain available.
+- **Export or hand off.** Export TXT, Markdown or JSON, or prepare a transcript for Claude. You choose when to copy, attach and send it; oats does not automatically submit a summary request.
+- **Optionally review speakers.** Separately configured Community-1 speaker identification runs after a saved transcript is ready. It is not live speaker recognition and is not included in the complete setup.
+
+### How transcription works
+
+```mermaid
+flowchart TD
+    A["Start a new note or accept a recording prompt"] --> B["Save microphone and computer audio separately"]
+    A --> N["Write notes with autosave"]
+    B --> C{"When should transcription run?"}
+    C -->|"Supported GPU and live mode"| D["Process saved windows during recording"]
+    C -->|"CPU or deferred mode"| E["Finish recording, then process saved windows"]
+    D --> P["Check for speech in saved audio windows"]
+    E --> P
+    P --> F["Trelis turns speech into text"]
+    F --> G["Retry repetition or cut-off output where needed"]
+    G --> H["Transcript updates as windows complete"]
+    H --> I["Finish any remaining saved audio"]
+    I --> J["Notes, transcript and recording in one workspace"]
+    N --> J
+    B -->|"Choose Apex fallback"| K["Replay saved audio into a separate version"]
+    K --> J
+    J --> L["Review, correct and play back"]
+    L --> M["Export or manually hand off to Claude"]
+```
+
+**Audio is saved before recognition.** Recording continues independently of model loading or transcription. In live mode, finishing the recording lets the same Trelis job process its remaining audio; it does not start a second full pass. Other transcription work can queue, and CPU meeting transcription waits until capture finishes.
+
+The speech checks include a conservative speech detector and a quiet-microphone policy. Very quiet microphone speech can be omitted from the transcript, while the source audio is retained. Automatic checks and retries help with review; they do not establish that every word is correct. See the [detailed processing flow](docs/HOW_IT_WORKS.md#how-each-piece-of-audio-becomes-text).
+
+![Fictional transcript showing computer and microphone audio in separate bubbles](docs/assets/oats-transcript-bubbles.png)
+
+## Dictation into another app
+
+1. Keep oats running, including in the system tray.
+2. Click the text field where you want to write.
+3. Press **Ctrl + Alt + Shift + D** and speak.
+4. Confirmed text is typed into that field while dictation continues. Press the shortcut again, or **Stop**, to finish the remaining words.
+
+The **Copilot key** can use the same toggle when it emits the supported **Win + Shift + F23** signal. Check **Settings → Dictation** for shortcut availability; use the fallback shortcut if your laptop or Windows configuration does not support the Copilot key.
+
+### What to expect
+
+- **A movable slim pill.** The floating indicator shows microphone activity, status, Stop and Cancel. Drag its grip to move it; oats remembers the position.
+- **Confirmed words, with a delay.** The Trelis worker compares successive recognition results and types words that agree. Tentative trailing words stay pending; pauses and Stop help finish the tail. This is not instant, guaranteed word-by-word output.
+- **Focus stays with you.** Moving the mouse or dragging the indicator does not alone interrupt insertion. Changing apps or text fields, clicking to move the caret, or editing with the keyboard can stop automatic typing to protect the destination. oats does not follow you across tabs or force focus back.
+- **A copy fallback.** If insertion is interrupted or unavailable, the result remains available to review and copy. Words already typed are kept. Starting dictation from Settings produces a result to copy rather than typing into another app.
+- **Local model reuse.** The model can prepare while speech work is idle and be reused across dictations. Cold starts and CPU mode can still be slow. Finish meeting recording and local speech processing before starting dictation.
+
+Dictation uses the default microphone and is limited to two minutes per session. It does not create a saved meeting. See the [dictation guide](docs/DICTATION.md) for input safeguards, model lifecycle and compatibility details.
+
+## Notes and organisation
+
+| Feature | What you can do |
+| --- | --- |
+| Projects and folders | Group meetings and notes, move them between projects, and browse your library |
+| Tags and search | Tag notes and filter within a folder; search titles, note previews and tags |
+| Rich notes | Use bold, italic, underline, strikethrough, highlighting, links, headings, lists, quotes and horizontal rules |
+| Editable titles | Rename a meeting directly from its notes page, including after recording has finished |
+| Project memory | Find source-linked excerpts from saved notes and project references |
+| Optional project Vault | Keep verified names, terms, quantities and their supporting sources; entries do not silently rewrite transcripts |
+| User / Dev views | Use the uncluttered User view or expose processing diagnostics in Dev view |
+| Saved-audio recovery | Recover interrupted recordings, retry recognition, or explicitly delete recovery audio while keeping saved notes and text |
+
+<details>
+<summary>See the notes library</summary>
 
 ![oats notes library grouped by project](docs/assets/xx-library.png)
 
-## What it does
+</details>
 
-- Opens in a narrow 680 × 820 window, adjusted to fit the screen. Maximize extends it vertically while retaining its current width; Restore returns to the prior size. The home screen groups notes by project; **New note** immediately starts recording and opens a clean writing space.
-- Autosaves notes locally. The microphone/up-arrow **Transcript** control reveals recognition when needed; playback, corrections, versions and export remain available.
-- Provides **Project memory**: source-linked saved-note excerpts and checked project references. It does not generate facts or infer a knowledge graph from unverified speech.
-- Records microphone and system audio into separate local tracks, with a recovery journal written before transcription.
-- Offers a small **Record call / Dismiss** prompt when Zoom or Teams desktop activates its microphone. Recording starts only after you choose; no calendar connection is needed. [Detection limits and settings](docs/MEETING_DETECTION.md).
-- Offers **Trelis chunks of 5, 10, or 20 seconds**, with 10 seconds as the default for new settings. OpenVINO GPU FP16 preserves the original Hindi/English script. Silero checks microphone and computer audio separately. Repeating or token-limited text first gets a retry with surrounding audio, then a bounded 5-second fallback if needed. The same job finishes remaining saved audio after you stop.
-- Offers **Apex · 20 seconds** as an explicit fallback. Trelis pauses after its current window, then Apex replays the saved audio into a separate Roman Hinglish version.
-- Retains raw output, separate corrections, and history. “Final transcript” means the Trelis job completed; it remains unreviewed machine output until you check it.
-- Keeps recordings, transcripts, notes, speaker review, and playback together.
-- Runs optional Community-1 speaker identification locally after recording and transcription complete.
-- Lets you copy a corrected transcript into Claude or export a text attachment. You choose when to send it. There is no Qwen summary model or automatic Claude/API upload.
-- Includes an optional evidence-backed project Vault for verified names, terms, and quantities. Vault entries do not silently rewrite what a model heard.
+## Install and update
 
-See [oats 0.7.4 release notes](docs/releases/0.7.4.md) for speech recovery, chat bubbles, and the paired desktop/worker update.
+### First installation
 
-Computer speech appears on the left and microphone speech on the right. These labels identify audio sources; optional speaker processing remains separate. The preview below uses fictional text.
+Download **[Oats-Setup.exe](https://github.com/Ripplescale/Oats_Transcription_Platform/releases/download/setup-90c87eedfa370799c4de/Oats-Setup.exe)**, open it and click **Install oats**. It downloads the app and speech dependencies from GitHub. No Python installation, terminal commands or account setup are needed for the core workflow.
 
-![Fictional oats transcript with computer and microphone speech bubbles](docs/assets/oats-transcript-bubbles.png)
+| Requirement | Guidance |
+| --- | --- |
+| Operating system | Windows x64; Windows 11 recommended. The published installer does not support Windows ARM or macOS |
+| Memory | At least 16 GB RAM; 32 GB recommended for live Trelis transcription |
+| Free disk space | Keep about 30 GB free for download and setup |
+| Initial download | About 11 GB, including the speech models and runtime |
+| Live Trelis processing | A compatible Intel GPU and current driver; CPU mode works after meeting recording and can be slow for dictation |
 
-The everyday flow is **choose a project → New note → write while oats records → stop → review/export**. The transcript starts collapsed and continues processing in the background. Updates use the chosen chunk length **plus processing and queueing time**, and GPU startup adds initial delay. One heavy worker runs at a time, so back-to-back calls can queue; recording continues independently. A GPU failure is shown explicitly, without silently switching Trelis to CPU. Choose Apex fallback or retry when ready. Existing transcript versions, including older Apex-draft/Trelis-final calls, keep their original workflow and corrections.
+Once setup is complete, recording and speech recognition can run without internet. To prepare another PC without internet, choose **Download for another PC** and transfer the whole download folder. See the [short installation guide](docs/COMPLETE_SETUP.md) for both cases.
 
-Outlook calendar sync and automatically generated pre-meeting recaps are not enabled. An approved calendar integration is required before attendee matching can be connected to saved notes; see [meeting preparation](docs/HOW_IT_WORKS.md#meeting-preparation).
+### Already installed?
 
-The integrated GPU adapter reproduced **23/23 CPU chunk outputs over 400.15 seconds** of development audio. The earlier acceleration experiment measured **8.14× faster** processing on a matched warm subset. A five-minute replay through the actual worker completed **30/30 windows across two saved-audio streams**, preserving raw output and finishing about **16 seconds after input stopped**. It **missed the strict latency gate**: first text took about 50 seconds; the 95th-percentile delay was about 30 seconds after a window ended. These results came from an Intel Ultra 7 268V / Arc 140V laptop. They do not qualify physical capture, a concurrent calling application, or 90-minute performance. See [timing and validation details](docs/HOW_IT_WORKS.md#models-and-timing).
+Use the app's update notification or **About → Check for updates**. Update checks run automatically; you choose when to download and install. The smaller app update reuses prepared speech models and keeps local work. Fully quit other oats copies before installing an update.
 
-This is an early Windows implementation. The small app-update installer reuses prepared speech models and Python; the separate complete setup bundles those dependencies for a new PC. Hands-on clean-machine acceptance and broad hardware qualification remain work to do. Optional gated speaker identification is not included in the complete setup. The source repository does not contain private recordings, benchmark references, model weights, or credentials; redistributable speech models are hosted separately as GitHub release assets.
+If a download is interrupted, reopen setup and choose the same download folder. If a meeting says **Transcription needs attention**, update oats, open **Tools → Transcription & versions**, and retry the saved audio. [Setup and repair help](docs/COMPLETE_SETUP.md#if-transcription-says-needs-attention).
 
-The 10-second default is not a universal accuracy optimum. Names, numbers, units, overlap, and quiet input can still be wrong. Automatic flags and retries help find some failures; they do not prove completeness. Two-hour calls, headset reconnects, and live speaker recognition are not yet fully qualified. Screen video and shared workspaces are outside the current scope.
+## Privacy and practical limits
 
-## Development
+- **Speech recognition runs locally.** Recordings are not automatically sent to a transcription or summary API. Setup and update checks/downloads use the network; any content you send through Claude or an exported file is your choice.
+- **Local does not mean encrypted by oats.** Protection depends on Windows permissions, device encryption and your backup settings. Read the [privacy policy](PRIVACY_POLICY.md) for storage and retention details.
+- **Review important details.** Names, numbers, units, overlap and quiet speech can be wrong. A completed transcript means processing finished, not that a person verified it.
+- **Hardware affects timing.** Startup, model loading, retries and queued jobs add delay. Performance on one development laptop is not a guarantee for another PC or a long call. [Measurements and validation limits](docs/HOW_IT_WORKS.md#models-and-timing).
+- **Some integrations are outside the current release.** Outlook calendar sync, automatic meeting recaps, live individual speaker identification, screen video and shared workspaces are not enabled.
+- **Managed PCs have their own policies.** The app uses signed updater artifacts, but corporate endpoint-security acceptance is separate from download/signature verification.
 
-The app uses Tauri/Rust, Next.js/React, and SQLite. Local Python workers run the selected speech models and optional diarization. See [contributing](CONTRIBUTING.md) for focused checks and the [runtime guide](stt_lab/README.md) for setup tools.
+## Documentation and development
 
-The repository is named **Hinglish Transcription Platform**; the application is **oats** (previously xx). Its existing `com.sttapp.local` identity and `STTApp` data directory are retained so upgrades preserve local work.
+| Guide | Contents |
+| --- | --- |
+| [Install oats](docs/COMPLETE_SETUP.md) | Download, requirements, offline transfer, updates and repair |
+| [How it works](docs/HOW_IT_WORKS.md) | Capture, transcription windows, retries, versions, speakers and storage |
+| [Dictation](docs/DICTATION.md) | Shortcuts, live delivery, focus rules and local model lifecycle |
+| [Meeting detection](docs/MEETING_DETECTION.md) | Zoom/Teams prompts and detection limits |
+| [Developer setup](docs/DEVELOPER_SETUP.md) | Building and running from source |
+| [Contributing](CONTRIBUTING.md) | Contribution workflow and checks |
+| [Speech runtime](stt_lab/README.md) | Local model and worker tooling |
+| [Releases](https://github.com/Ripplescale/Oats_Transcription_Platform/releases) | Published installers, signatures and release notes |
+
+oats uses **Tauri/Rust**, **Next.js/React**, **SQLite** and local **Python** speech workers. The app was previously named xx; its existing `com.sttapp.local` identity and `STTApp` data directory are retained for upgrade continuity. Private recordings, credentials and model weights are not committed to the source repository; redistributable model bundles are hosted as GitHub release assets.
 
 ## Attribution
 
