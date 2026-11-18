@@ -1,5 +1,20 @@
 #[path = "../../src/audio/durable_capture.rs"]
 pub mod durable_capture;
+// Compile the production state machine too, substituting only the opaque
+// device handle. These tests never open a microphone or a speaker.
+#[cfg(test)]
+mod audio {
+    pub use crate::durable_capture;
+    pub mod devices {
+        pub struct AudioDevice;
+    }
+    pub mod buffer_pool {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../src/audio/buffer_pool.rs"));
+    }
+    pub mod recording_state {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../src/audio/recording_state.rs"));
+    }
+}
 #[cfg(test)]
 #[path = "../../src/audio/recording_shutdown.rs"]
 mod recording_shutdown;

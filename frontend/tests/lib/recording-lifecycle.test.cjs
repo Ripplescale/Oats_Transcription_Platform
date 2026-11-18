@@ -80,6 +80,22 @@ test('concurrent state refreshes share one read and reread after a newer native 
     assert.equal(reads, 2); assert.equal(f.state.isRecording, false);
   } finally { await f.close(); }
 });
+test('an audio gap warns without leaving the active recording or disabling Stop', async () => {
+  const f = await fixture('missing');
+  try {
+    await act(async () => {
+      f.listeners['recording-warning']({ payload: 'Recording continues. A short section of audio was lost.' });
+      await flush();
+    });
+    assert.equal(f.state.isRecording, true);
+    assert.equal(f.state.recordingError, null);
+    assert.equal(f.view.root.findByProps({ 'aria-label': 'Stop recording' }).props.disabled, false);
+    assert.equal(f.toasts.at(-1).name, 'warning');
+    assert.match(f.toasts.at(-1).args[1].description, /Recording continues/);
+    assert.ok(!f.calls.includes('stop_recording'));
+  } finally { await f.close(); }
+});
+
 for (const mode of ['disk-error', 'missing']) test(`Finish ${mode} reconciles and releases the New note guard`, async () => {
   const f = await fixture(mode);
   try {

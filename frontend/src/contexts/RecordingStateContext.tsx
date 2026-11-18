@@ -217,6 +217,10 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
           void syncWithBackend().catch(() => {});
         }));
 
+        await attach(recordingService.onRecordingWarning(message => {
+          toast.warning('Recording continues with an audio gap', { description: message, duration: 10000 });
+        }));
+
         // Recording paused
         await attach(recordingService.onRecordingPaused(() => {
           eventRevision.current++;

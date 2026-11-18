@@ -12,13 +12,32 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 
 /// Classic PCM WAV and the journal verifier share this enforced session limit.
 /// Capture stops automatically; callers may start a fresh recording afterward.
 pub const MAX_CAPTURE_SECONDS: f64 = 8.0 * 3600.0;
+// Small WASAPI callbacks can fill a message-count-only queue in seconds.
+// Allow a longer disk stall, but cap queued PCM at 32 MiB at every sample rate.
+const CAPTURE_QUEUE_MESSAGES: usize = 8192;
+const CAPTURE_QUEUE_SAMPLES: usize = 32 * 1024 * 1024 / std::mem::size_of::<f32>();
+
+#[derive(Clone)]
+struct CaptureGap {
+    start: f64,
+    end: f64,
+    samples: u64,
+    duration: f64,
+}
+
+impl CaptureGap {
+    fn record(&self, track: &str) -> Value {
+        json!({"kind":"gap", "track":track, "start_seconds":self.start,
+            "end_seconds":self.end, "dropped_samples":self.samples, "reason":"capture_queue_overflow"})
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureInfo {
@@ -28,7 +47,7 @@ pub struct CaptureInfo {
 }
 
 enum Message {
-    Audio { track: String, rate: u32, start: f64, samples: Vec<f32> },
+    Audio { track: String, rate: u32, start: f64, samples: Vec<f32>, gap: Option<CaptureGap> },
     Event(Value),
 }
 
@@ -37,30 +56,67 @@ pub struct CaptureSink {
     sender: Arc<Mutex<Option<mpsc::SyncSender<Message>>>>,
     failure: Arc<Mutex<Option<String>>>,
     dropped: Arc<AtomicU64>,
+    queued_samples: Arc<AtomicUsize>,
+    pending_gaps: Arc<Mutex<BTreeMap<String, CaptureGap>>>,
+    dropped_events: Arc<AtomicU64>,
 }
 
 impl CaptureSink {
     /// Never wait on disk or a full queue in an audio callback.
     pub fn audio(&self, track: &str, rate: u32, start: f64, samples: &[f32]) {
         if samples.is_empty() || rate == 0 { return; }
-        let message = Message::Audio { track: track.into(), rate, start: start.max(0.0), samples: samples.to_vec() };
+        if !["microphone", "system"].contains(&track) || !start.is_finite() || !(8000..=384000).contains(&rate) {
+            *self.failure.lock().unwrap() = Some("Invalid source audio metadata".into());
+            return;
+        }
+        let start = start.clamp(0.0, MAX_CAPTURE_SECONDS);
         if let Some(sender) = self.sender.lock().unwrap().as_ref() {
-            if sender.try_send(message).is_err() {
-                self.dropped.fetch_add(samples.len() as u64, Ordering::Relaxed);
-                *self.failure.lock().unwrap() = Some("Capture queue overflow or writer unavailable; inspect timeline gaps".into());
+            let mut gaps = self.pending_gaps.lock().unwrap();
+            let reserved = self.queued_samples.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+                |count| count.checked_add(samples.len()).filter(|next| *next <= CAPTURE_QUEUE_SAMPLES)).is_ok();
+            let result = if reserved {
+                sender.try_send(Message::Audio { track: track.into(), rate, start, samples: samples.to_vec(), gap: gaps.get(track).cloned() })
+            } else {
+                self.note_drop(&mut gaps, track, rate, start, samples.len());
+                return;
+            };
+            match result {
+                Ok(()) => { gaps.remove(track); }
+                Err(error) => {
+                    self.queued_samples.fetch_sub(samples.len(), Ordering::Relaxed);
+                    self.note_drop(&mut gaps, track, rate, start, samples.len());
+                    if matches!(error, mpsc::TrySendError::Disconnected(_)) {
+                        self.failure.lock().unwrap().get_or_insert_with(|| "Source audio writer is unavailable; saved chunks are retained".into());
+                    }
+                }
             }
         }
     }
 
+    fn note_drop(&self, gaps: &mut BTreeMap<String, CaptureGap>, track: &str, rate: u32, start: f64, count: usize) {
+        self.dropped.fetch_add(count as u64, Ordering::Relaxed);
+        let end = (start + count as f64 / rate as f64).min(MAX_CAPTURE_SECONDS);
+        let gap = gaps.entry(track.into()).or_insert(CaptureGap { start, end, samples: 0, duration: 0.0 });
+        gap.end = gap.end.max(end);
+        gap.samples += count as u64;
+        gap.duration += count as f64 / rate as f64;
+    }
+
     pub fn event(&self, event: Value) {
         if let Some(sender) = self.sender.lock().unwrap().as_ref() {
-            if sender.try_send(Message::Event(event)).is_err() {
-                *self.failure.lock().unwrap() = Some("Could not persist capture event".into());
+            match sender.try_send(Message::Event(event)) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => { self.dropped_events.fetch_add(1, Ordering::Relaxed); }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    self.failure.lock().unwrap().get_or_insert_with(|| "Source audio writer is unavailable; saved chunks are retained".into());
+                }
             }
         }
     }
 
     pub fn error(&self) -> Option<String> { self.failure.lock().unwrap().clone() }
+
+    pub fn dropped_samples(&self) -> u64 { self.dropped.load(Ordering::Relaxed) }
 }
 
 pub struct DurableRecorder {
@@ -87,12 +143,18 @@ impl DurableRecorder {
         }))?;
         metadata.sync_all()?;
         let journal = OpenOptions::new().create_new(true).write(true).open(&info.timeline_path)?;
-        let (sender, receiver) = mpsc::sync_channel(1024);
+        let (sender, receiver) = mpsc::sync_channel(CAPTURE_QUEUE_MESSAGES);
         let failure = Arc::new(Mutex::new(None));
         let dropped = Arc::new(AtomicU64::new(0));
-        let sink = CaptureSink { sender: Arc::new(Mutex::new(Some(sender))), failure: failure.clone(), dropped: dropped.clone() };
+        let queued_samples = Arc::new(AtomicUsize::new(0));
+        let dropped_events = Arc::new(AtomicU64::new(0));
+        let sink = CaptureSink { sender: Arc::new(Mutex::new(Some(sender))), failure: failure.clone(), dropped: dropped.clone(),
+            queued_samples: queued_samples.clone(), pending_gaps: Arc::new(Mutex::new(BTreeMap::new())), dropped_events: dropped_events.clone() };
         let writer = std::thread::Builder::new().name("durable-source-audio".into()).spawn(move || {
-            let result = write_loop(directory, journal, receiver, dropped);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                write_loop(directory, journal, receiver, dropped, queued_samples, dropped_events)))
+                .map_err(|_| anyhow::anyhow!("Source writer panicked"))
+                .and_then(|result| result);
             if let Err(error) = &result { *failure.lock().unwrap() = Some(format!("Source recording failed: {error:#}")); }
             result
         })?;
@@ -104,6 +166,10 @@ impl DurableRecorder {
         if self.writer.is_some() {
             // Control messages may wait here: streams have already stopped.
             if let Some(sender) = self.sink.sender.lock().unwrap().take() {
+                for (track, gap) in std::mem::take(&mut *self.sink.pending_gaps.lock().unwrap()) {
+                    sender.send(Message::Event(gap.record(&track)))
+                        .map_err(|_| anyhow::anyhow!("Source writer stopped before gap acknowledgement"))?;
+                }
                 sender.send(Message::Event(json!({"kind":"capture_stopped", "at_seconds":duration})))
                     .map_err(|_| anyhow::anyhow!("Source writer stopped before acknowledgement"))?;
                 drop(sender);
@@ -175,18 +241,33 @@ fn commit(directory: &Path, journal: &mut File, name: &str, track: &mut Track, c
     Ok(())
 }
 
-fn write_loop(directory: PathBuf, mut journal: File, receiver: mpsc::Receiver<Message>, dropped: Arc<AtomicU64>) -> Result<()> {
+fn write_loop(directory: PathBuf, mut journal: File, receiver: mpsc::Receiver<Message>, dropped: Arc<AtomicU64>, queued_samples: Arc<AtomicUsize>, dropped_events: Arc<AtomicU64>) -> Result<()> {
     let mut tracks = BTreeMap::<String, Track>::new();
     journal_line(&mut journal, &json!({"kind":"capture_started", "at_seconds":0.0}))?;
     for message in receiver {
         match message {
             Message::Event(event) => journal_line(&mut journal, &event)?,
-            Message::Audio {track: name, rate, start, mut samples} => {
+            Message::Audio {track: name, rate, start, mut samples, gap} => {
+                queued_samples.fetch_sub(samples.len(), Ordering::Relaxed);
                 if !["microphone", "system"].contains(&name.as_str()) || !start.is_finite() || !(8000..=384000).contains(&rate) {
                     bail!("Invalid source audio metadata");
                 }
                 let start = start.min(MAX_CAPTURE_SECONDS);
                 let track = tracks.entry(name.clone()).or_default();
+                if let Some(mut gap) = gap {
+                    let buffered = track.buffer.len();
+                    commit(&directory, &mut journal, &name, track, buffered)?;
+                    // A sample clock may already lead callback timestamps. Keep
+                    // the missing duration even in that case instead of closing
+                    // up the gap when the writer catches up.
+                    gap.start = gap.start.max(track.next);
+                    gap.end = gap.end.max(gap.start + gap.duration).min(MAX_CAPTURE_SECONDS);
+                    journal_line(&mut journal, &gap.record(&name))?;
+                    // Even a sub-100ms overflow must leave a real timeline gap.
+                    track.start = start.max(track.next).max(gap.end);
+                    track.next = track.start;
+                    track.rate = rate;
+                }
                 // Sample counting absorbs ordinary callback jitter. A >100ms
                 // discontinuity starts a new run and records the missing range.
                 // Late/batched callbacks can temporarily be behind the sample
@@ -225,7 +306,7 @@ fn write_loop(directory: PathBuf, mut journal: File, receiver: mpsc::Receiver<Me
         let count = track.buffer.len();
         commit(&directory, &mut journal, name, track, count)?;
     }
-    journal_line(&mut journal, &json!({"kind":"capture_finalized", "dropped_samples":dropped.load(Ordering::Relaxed), "tracks":tracks.keys().collect::<Vec<_>>()}))?;
+    journal_line(&mut journal, &json!({"kind":"capture_finalized", "dropped_samples":dropped.load(Ordering::Relaxed), "dropped_events":dropped_events.load(Ordering::Relaxed), "tracks":tracks.keys().collect::<Vec<_>>()}))?;
     Ok(())
 }
 
@@ -372,10 +453,10 @@ mod tests {
         fs::create_dir_all(root.path().join("tracks/system")).unwrap();
         let journal = File::create(root.path().join("timeline.jsonl")).unwrap();
         let (sender, receiver) = mpsc::sync_channel(4);
-        sender.send(Message::Audio { track:"system".into(), rate:16000, start:MAX_CAPTURE_SECONDS - 0.25, samples:vec![0.25;16000] }).unwrap();
-        sender.send(Message::Audio { track:"system".into(), rate:16000, start:MAX_CAPTURE_SECONDS + 1.0, samples:vec![0.25;16000] }).unwrap();
+        sender.send(Message::Audio { track:"system".into(), rate:16000, start:MAX_CAPTURE_SECONDS - 0.25, samples:vec![0.25;16000], gap:None }).unwrap();
+        sender.send(Message::Audio { track:"system".into(), rate:16000, start:MAX_CAPTURE_SECONDS + 1.0, samples:vec![0.25;16000], gap:None }).unwrap();
         drop(sender);
-        write_loop(root.path().into(), journal, receiver, Arc::new(AtomicU64::new(0))).unwrap();
+        write_loop(root.path().into(), journal, receiver, Arc::new(AtomicU64::new(0)), Arc::new(AtomicUsize::new(32000)), Arc::new(AtomicU64::new(0))).unwrap();
         let rows:Vec<Value> = fs::read_to_string(root.path().join("timeline.jsonl")).unwrap().lines().map(|line|serde_json::from_str(line).unwrap()).collect();
         let chunks:Vec<_> = rows.iter().filter(|row|row["kind"] == "audio_chunk").collect();
         assert_eq!(chunks.len(), 1);
@@ -418,16 +499,115 @@ mod tests {
         assert!(chunk.exists());
     }
 
-    #[test]
-    fn queue_failure_is_visible_and_does_not_block_capture_callback() {
-        let (sender, _receiver) = mpsc::sync_channel(1);
-        let sink = CaptureSink {
+    fn stalled_recorder(root: &Path, capacity: usize) -> (DurableRecorder, mpsc::Receiver<Message>) {
+        let mut recorder = DurableRecorder::start(root, None, None, None).unwrap();
+        // Close and join the initial writer, then delay the replacement reader
+        // deterministically. No timing-dependent sleep or real device is used.
+        recorder.sink.sender.lock().unwrap().take();
+        recorder.writer.take().unwrap().join().unwrap().unwrap();
+        let (sender, receiver) = mpsc::sync_channel(capacity);
+        recorder.sink = CaptureSink {
             sender: Arc::new(Mutex::new(Some(sender))),
             failure: Arc::new(Mutex::new(None)), dropped: Arc::new(AtomicU64::new(0)),
+            queued_samples: Arc::new(AtomicUsize::new(0)), pending_gaps: Arc::new(Mutex::new(BTreeMap::new())),
+            dropped_events: Arc::new(AtomicU64::new(0)),
         };
-        sink.audio("microphone", 16000, 0.0, &[0.5; 16]);
-        sink.audio("microphone", 16000, 0.001, &[0.5; 16]);
-        assert!(sink.error().is_some());
-        assert_eq!(sink.dropped.load(Ordering::Relaxed), 16);
+        (recorder, receiver)
+    }
+
+    fn restart_writer(recorder: &mut DurableRecorder, receiver: mpsc::Receiver<Message>) {
+        let directory = recorder.info.session_dir.clone();
+        let journal = File::create(&recorder.info.timeline_path).unwrap();
+        let sink = recorder.sink.clone();
+        recorder.writer = Some(std::thread::spawn(move || write_loop(directory, journal, receiver,
+            sink.dropped.clone(), sink.queued_samples.clone(), sink.dropped_events.clone())));
+    }
+
+    #[test]
+    fn callback_backlog_larger_than_the_old_queue_is_retained_without_loss() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut recorder, receiver) = stalled_recorder(root.path(), CAPTURE_QUEUE_MESSAGES);
+        for index in 0..1500 {
+            recorder.sink.audio("microphone", 16000, index as f64 / 1000.0, &[0.5; 16]);
+        }
+        assert_eq!(recorder.sink.dropped_samples(), 0);
+        assert_eq!(recorder.sink.queued_samples.load(Ordering::Relaxed), 24000);
+        restart_writer(&mut recorder, receiver);
+        let info = recorder.finish(1.5).unwrap();
+        let report = recover_capture(&info.session_dir).unwrap();
+        assert_eq!(report["dropped_samples"], 0);
+        assert_eq!(fs::metadata(info.session_dir.join("tracks/microphone/00000000.wav")).unwrap().len(), 44 + 32000);
+        assert_eq!(fs::metadata(info.session_dir.join("tracks/microphone/00000001.wav")).unwrap().len(), 44 + 16000);
+    }
+
+    #[test]
+    fn real_source_write_failure_still_fails_finalization_and_retains_the_session() {
+        let root = tempfile::tempdir().unwrap();
+        let mut recorder = DurableRecorder::start(root.path(), None, None, None).unwrap();
+        fs::remove_dir(recorder.info.session_dir.join("tracks/system")).unwrap();
+        recorder.sink.audio("system", 16000, 0.0, &[0.5; 16000]);
+        assert!(recorder.finish(1.0).is_err());
+        assert!(recorder.info.session_dir.join("session.json").exists());
+        assert!(recorder.info.timeline_path.exists());
+    }
+
+    #[test]
+    fn queue_overflow_continues_and_finalizes_with_explicit_short_gap() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut recorder, receiver) = stalled_recorder(root.path(), 1);
+        recorder.sink.audio("microphone", 16000, 0.0, &[0.5; 160]);
+        recorder.sink.audio("microphone", 16000, 0.01, &[0.5; 160]);
+        recorder.sink.event(json!({"kind":"synthetic_event"}));
+        assert!(recorder.sink.error().is_none());
+        assert_eq!(recorder.sink.dropped_samples(), 160);
+        assert_eq!(recorder.sink.queued_samples.load(Ordering::Relaxed), 160);
+        // Drain one accepted callback, then capture again after the stall.
+        let first = receiver.recv().unwrap();
+        recorder.sink.queued_samples.fetch_sub(160, Ordering::Relaxed);
+        recorder.sink.audio("microphone", 16000, 0.02, &[0.25; 160]);
+        let second = receiver.recv().unwrap();
+        let (sender, replay) = mpsc::sync_channel(4);
+        sender.send(first).unwrap(); sender.send(second).unwrap();
+        *recorder.sink.sender.lock().unwrap() = Some(sender);
+        recorder.sink.queued_samples.store(320, Ordering::Relaxed);
+        restart_writer(&mut recorder, replay);
+        let info = recorder.finish(0.03).unwrap();
+        let report: Value = serde_json::from_slice(&fs::read(info.session_dir.join("recovery-verified.json")).unwrap()).unwrap();
+        assert_eq!(report["dropped_samples"], 160);
+        assert!(report["gaps"].as_array().unwrap().iter().any(|gap| gap["reason"] == "capture_queue_overflow" && gap["start_seconds"] == 0.01 && gap["end_seconds"] == 0.02));
+        let wav = fs::read(info.session_dir.join("microphone.wav")).unwrap();
+        assert_ne!(&wav[44..46], &[0, 0]);
+        assert!(wav[44 + 480 * 2..44 + 960 * 2].iter().all(|byte| *byte == 0));
+        assert_ne!(&wav[44 + 960 * 2..46 + 960 * 2], &[0, 0]);
+        assert_eq!(recorder.sink.queued_samples.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn trailing_overflow_is_retained_even_without_another_callback() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut recorder, receiver) = stalled_recorder(root.path(), 1);
+        recorder.sink.audio("system", 16000, 0.0, &[0.5; 160]);
+        recorder.sink.audio("system", 16000, 0.01, &[0.5; 160]);
+        restart_writer(&mut recorder, receiver);
+        let info = recorder.finish(0.02).unwrap();
+        let report = recover_capture(&info.session_dir).unwrap();
+        assert_eq!(report["dropped_samples"], 160);
+        assert!(report["gaps"].as_array().unwrap().iter().any(|gap| gap["reason"] == "capture_queue_overflow"));
+    }
+
+    #[test]
+    fn queued_pcm_has_a_memory_limit_and_a_dead_writer_is_still_fatal() {
+        let root = tempfile::tempdir().unwrap();
+        let (recorder, receiver) = stalled_recorder(root.path(), 8);
+        recorder.sink.queued_samples.store(CAPTURE_QUEUE_SAMPLES, Ordering::Relaxed);
+        recorder.sink.audio("system", 16000, 0.0, &[0.5; 160]);
+        assert_eq!(recorder.sink.dropped_samples(), 160);
+        assert!(recorder.sink.error().is_none());
+        assert!(matches!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        recorder.sink.queued_samples.store(0, Ordering::Relaxed);
+        drop(receiver);
+        recorder.sink.audio("system", 16000, 0.01, &[0.5; 160]);
+        assert!(recorder.sink.error().unwrap().contains("writer is unavailable"));
+        assert_eq!(recorder.sink.queued_samples.load(Ordering::Relaxed), 0);
     }
 }

@@ -176,6 +176,10 @@ export class RecordingService {
     return listen<string>('recording-error', event => callback(event.payload));
   }
 
+  async onRecordingWarning(callback: (message: string) => void): Promise<UnlistenFn> {
+    return listen<string>('recording-warning', event => callback(event.payload));
+  }
+
   /**
    * Listen for recording-paused event
    * @param callback - Function to call when recording is paused

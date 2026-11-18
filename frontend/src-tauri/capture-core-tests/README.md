@@ -2,7 +2,13 @@
 
 This small crate compiles the production `audio/durable_capture.rs` directly.
 It tests queue draining, independent source tracks, silence/gaps, audio-only
-recovery, torn journal tails, corruption retention, and visible queue overflow.
+recovery, torn journal tails, corruption retention, and recovery from queue
+overflow. Deterministically stalled writers verify the larger callback queue,
+PCM memory bound, short and trailing loss gaps, successful finalization after
+overflow, and fatal handling of a disconnected writer or real file-write error.
+The production recording state is also compiled with an opaque device stand-in
+to check recoverable-error handling and the duration limit without opening audio
+devices.
 
 The build script also parses `local_workspace.rs` and compiles its exact
 non-command items and tests, omitting only Tauri commands and the two Tauri/app

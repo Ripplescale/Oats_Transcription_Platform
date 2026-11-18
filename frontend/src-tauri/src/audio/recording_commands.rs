@@ -779,6 +779,7 @@ fn spawn_capture_health_monitor<R: Runtime>(app: AppHandle<R>, session: Arc<supe
         // Start publishes the manager and flags while holding this lease.
         let started = CAPTURE_START_LOCK.lock().await;
         drop(started);
+        let mut warned_about_drops = false;
         loop {
             if !session_live(&session) { return; }
             if let Some(message) = super::recording_shutdown::stop_reason(session.is_recording(), session.get_recording_duration().unwrap_or(0.0), session.capture_error()) {
@@ -786,6 +787,10 @@ fn spawn_capture_health_monitor<R: Runtime>(app: AppHandle<R>, session: Arc<supe
                 let _ = app.emit("recording-error", &message);
                 let _ = stop_recording(app.clone(), RecordingArgs { save_path:String::new() }).await;
                 return;
+            }
+            if !warned_about_drops && session.dropped_capture_samples() > 0 {
+                warned_about_drops = true;
+                let _ = app.emit("recording-warning", "Recording continues, but some audio was lost while saving fell behind. You can keep recording or stop to review the saved audio.");
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
@@ -1439,7 +1444,7 @@ async fn recover_system_device<R: Runtime>(app: AppHandle<R>, session: Arc<super
     }
     if session_live(&session) {
         session.capture_event("device_recovery_failed", serde_json::json!({"track":"system","device_name":disconnected,"error":last_error}));
-        let _ = app.emit("recording-error", format!("System audio unavailable; microphone continues. {last_error}"));
+        let _ = app.emit("recording-warning", format!("System audio unavailable; microphone continues. {last_error}"));
     }
 }
 

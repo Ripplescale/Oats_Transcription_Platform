@@ -275,6 +275,10 @@ impl RecordingState {
         self.capture_sink.lock().unwrap().as_ref().and_then(|sink| sink.error())
     }
 
+    pub fn dropped_capture_samples(&self) -> u64 {
+        self.capture_sink.lock().unwrap().as_ref().map_or(0, |sink| sink.dropped_samples())
+    }
+
     pub fn set_audio_sender(&self, sender: mpsc::UnboundedSender<AudioChunk>) {
         *self.audio_sender.lock().unwrap() = Some(sender);
     }
@@ -335,7 +339,7 @@ impl RecordingState {
         }
 
         // Fallback: stop recording after too many total errors
-        if count >= 15 {
+        if count >= 15 && self.capture_sink.lock().unwrap().is_none() {
             log::error!("Too many total audio errors ({}), stopping recording", count);
             self.stop_recording();
         }
@@ -469,6 +473,29 @@ impl Clone for RecordingStats {
 #[cfg(test)]
 mod limit_tests {
     use super::*;
+    #[test]
+    fn recoverable_device_errors_do_not_stop_a_durable_recording() {
+        let root = tempfile::tempdir().unwrap();
+        let mut recorder = super::super::durable_capture::DurableRecorder::start(root.path(), None, None, None).unwrap();
+        let state = RecordingState::new();
+        state.set_capture_sink(recorder.sink.clone());
+        state.start_recording().unwrap();
+        for _ in 0..20 { state.report_error(AudioError::DeviceDisconnected); }
+        assert!(state.is_recording());
+        assert!(state.capture_source("microphone", 16000, 0.0, &[0.5; 160]));
+        // A true permission failure still stops capture immediately.
+        state.report_error(AudioError::PermissionDenied);
+        assert!(!state.is_recording());
+        recorder.finish(0.01).unwrap();
+    }
+
+    #[test]
+    fn legacy_recording_keeps_its_recoverable_error_limit() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        for _ in 0..10 { state.report_error(AudioError::StreamFailed); }
+        assert!(!state.is_recording());
+    }
     #[test]
     fn reaching_duration_limit_stops_outside_callback_barrier_without_fabricating_audio() {
         let root = tempfile::tempdir().unwrap();
