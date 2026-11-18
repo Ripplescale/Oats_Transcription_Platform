@@ -45,3 +45,11 @@ The full Windows MSVC app check also passed using
 `frontend/src-tauri/scripts/build-local-windows.ps1 -Mode Check` with the local
 runtime and build cache. Live microphone, system-audio and Bluetooth acceptance
 remain unverified.
+
+The GitHub release gates also passed 165 frontend/feed checks, 164 native
+checks (two explicit probes skipped) and 10 updater-policy checks. The first
+package attempt then stopped because Microsoft's pinned GitHub ONNX Runtime
+archive returned HTTP 404. Windows builds now fetch Microsoft's official
+1.22.0 CPU NuGet package instead. Its SHA-512 was checked against the NuGet
+catalog before pinning its size and SHA-256; both native DLLs and the license
+match the existing per-file hashes exactly. The shipped runtime is unchanged.
