@@ -42,7 +42,7 @@ Record a call and take notes, or speak into the app where you are already writin
 - **Retry saved audio.** If recognition fails, retry the saved recording without asking everyone to repeat the call. Suspicious repetition and length-limited output can trigger bounded retries using surrounding audio or shorter pieces.
 - **Compare a fallback version.** Choose **Apex fallback** to reprocess saved audio into a separate Roman Hinglish transcript. Trelis output and its corrections remain available.
 - **Export or hand off.** Export TXT, Markdown or JSON, or prepare a transcript for Claude. You choose when to copy, attach and send it; oats does not automatically submit a summary request.
-- **Optionally review speakers.** Separately configured Community-1 speaker identification runs after a saved transcript is ready. It is not live speaker recognition and is not included in the complete setup.
+- **Review who spoke.** An optional local model estimates speaker turns after a meeting. Listen back and give names to Speaker 1, Speaker 2 and the others. [Set up pyannote speaker labels](#set-up-pyannote-speaker-labels).
 
 ### How transcription works
 
@@ -118,6 +118,29 @@ Download **[Oats-Setup.exe](https://github.com/Ripplescale/Oats_Transcription_Pl
 | Live Trelis processing | A compatible Intel GPU and current driver; CPU mode works after meeting recording and can be slow for dictation |
 
 Once setup is complete, recording and speech recognition can run without internet. To prepare another PC without internet, choose **Download for another PC** and transfer the whole download folder. See the [short installation guide](docs/COMPLETE_SETUP.md) for both cases.
+
+### Set up pyannote speaker labels
+
+Use this optional setup if you want to see **who spoke when** in a finished meeting. Install oats first. Setup needs internet once and at least 4 GiB of available RAM for its final check. After that, speaker labeling runs on your PC.
+
+1. Sign in to Hugging Face and accept the access conditions for [pyannote Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1).
+2. On that same account, create a token with **Read** access and copy it. [Hugging Face access tokens](https://huggingface.co/settings/tokens).
+3. Get the setup scripts. On the [oats releases page](https://github.com/Ripplescale/Oats_Transcription_Platform/releases), open the version shown in **About** and download **Source code (zip)**. Extract the ZIP. Open PowerShell in the extracted folder that contains `stt_lab`. If you already have the source for your version, use that folder.
+4. Run the login command below. Paste your token at the private prompt and press Enter. The characters may stay hidden. If asked to save it as a Git credential, choose **N**.
+
+   ```powershell
+   .\stt_lab\tools\login_speaker_model.ps1
+   ```
+
+5. After login succeeds, run the setup command in the same window. Wait for `"model_available": true`, which means oats can use the model.
+
+   ```powershell
+   .\stt_lab\tools\setup_speakers.ps1
+   ```
+
+To try it, finish a short meeting with two speakers and let the transcript complete. Open the saved meeting and choose **Tools → Speakers**. Choose **Check setup again** if prompted. Once labeling finishes, expand **Speaker timeline** to review the turns. You can add names after listening.
+
+If you chose a custom oats data folder, set `$env:STTAPP_DATA_DIR` to the full path containing your `runtime.json` before running either command. For access or download problems, see the [speaker setup and troubleshooting guide](stt_lab/SPEAKER_SETUP.md).
 
 ### Already installed?
 
